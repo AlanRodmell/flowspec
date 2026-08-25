@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dagre from "@dagrejs/dagre";
 import {
   Background,
+  BaseEdge,
+  ConnectionMode,
   Controls,
   Handle,
   MarkerType,
@@ -12,6 +14,7 @@ import {
   ReactFlow,
   type Connection,
   type Edge,
+  type EdgeProps,
   type Node,
   type NodeProps,
   type ReactFlowInstance,
@@ -55,7 +58,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import "@xyflow/react/dist/style.css";
-import { getNewNodePosition, sortByHierarchy } from "./flowspec-canvas";
+import { getEdgeAnchors, getEdgeCurveOffset, getNewNodePosition, sortByHierarchy } from "./flowspec-canvas";
 import { GuidedPlanner, type GuidedNodeInput } from "./guided-planner";
 import { buildMermaidFlow, buildRepoAnalysisPrompt, buildTechnicalDocument, parseRepoAnalysis, type FlowDirection, type RepoNodeKind } from "./flowspec-import";
 import { buildTechnicalReview, type ReviewEdge, type ReviewNode } from "./flowspec-review";
@@ -79,17 +82,17 @@ interface PlannerNodeData extends Record<string, unknown> {
   inputs: string[];
   outputs: string[];
   notes: string;
-  flowDirection?: LayoutDirection;
 }
 
 interface PlannerEdgeData extends Record<string, unknown> {
   relationship: string;
   payload: string;
   notes: string;
+  routeOffset?: number;
 }
 
 type FlowNode = Node<PlannerNodeData, "planner">;
-type FlowEdge = Edge<PlannerEdgeData, "smoothstep">;
+type FlowEdge = Edge<PlannerEdgeData>;
 
 interface ProjectBrief {
   title: string;
@@ -121,6 +124,12 @@ const SHARE_BASE_URL = "https://alanrodmell.github.io/flowspec/";
 const MAX_SHARE_URL_LENGTH = 100_000;
 const NODE_W = 248;
 const NODE_H = 166;
+const ANCHOR_POSITIONS = [
+  ["anchor-left", Position.Left],
+  ["anchor-right", Position.Right],
+  ["anchor-top", Position.Top],
+  ["anchor-bottom", Position.Bottom],
+] as const;
 
 const KIND_META: Record<NodeKind, { label: string; color: string; icon: LucideIcon }> = {
   route: { label: "Route", color: "#ef6d48", icon: Route },
@@ -197,7 +206,7 @@ const edge = (id: string, source: string, target: string, relationship: string, 
   id,
   source,
   target,
-  type: "smoothstep",
+  type: "direct",
   label: relationship,
   markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
   data: { relationship, payload, notes: "" },
@@ -234,22 +243,34 @@ async function writeClipboard(value: string): Promise<void> {
 function PlannerNodeCard({ data, selected }: NodeProps<FlowNode>) {
   const meta = KIND_META[data.kind];
   const Icon = meta.icon;
-  const vertical = data.flowDirection === "TB";
-  const targetPosition = vertical ? Position.Top : Position.Right;
-  const sourcePosition = vertical ? Position.Bottom : Position.Left;
   return (
     <div className={`planner-node-card${selected ? " selected" : ""}`} style={{ "--node-color": meta.color } as React.CSSProperties}>
-      <Handle type="target" position={targetPosition} className="node-handle" />
+      {ANCHOR_POSITIONS.map(([id, position]) => <Handle key={id} id={id} type="source" position={position} className="node-handle" />)}
       <div className="node-kind"><Icon size={12} /> {meta.label}</div>
       <strong>{data.label}</strong>
       <p>{data.responsibility || "No responsibility described."}</p>
       <div className="node-meta"><span>{data.inputs.filter((item) => item.trim()).length} in</span><span>{data.outputs.filter((item) => item.trim()).length} out</span><span>{data.state.filter((item) => item.trim()).length} state</span></div>
-      <Handle type="source" position={sourcePosition} className="node-handle" />
     </div>
   );
 }
 
 const NODE_TYPES = { planner: PlannerNodeCard };
+
+function DirectPlannerEdge({ id, sourceX, sourceY, targetX, targetY, markerStart, markerEnd, style, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, interactionWidth, data }: EdgeProps<FlowEdge>) {
+  const offset = data?.routeOffset ?? 0;
+  const deltaX = targetX - sourceX;
+  const deltaY = targetY - sourceY;
+  const length = Math.hypot(deltaX, deltaY) || 1;
+  const controlX = (sourceX + targetX) / 2 - deltaY / length * offset;
+  const controlY = (sourceY + targetY) / 2 + deltaX / length * offset;
+  const labelX = (sourceX + 2 * controlX + targetX) / 4;
+  const labelY = (sourceY + 2 * controlY + targetY) / 4;
+  const path = `M ${sourceX} ${sourceY} Q ${controlX} ${controlY} ${targetX} ${targetY}`;
+
+  return <BaseEdge id={id} path={path} labelX={labelX} labelY={labelY} markerStart={markerStart} markerEnd={markerEnd} style={style} label={label} labelStyle={labelStyle} labelShowBg={labelShowBg} labelBgStyle={labelBgStyle} labelBgPadding={labelBgPadding} labelBgBorderRadius={labelBgBorderRadius} interactionWidth={interactionWidth} />;
+}
+
+const EDGE_TYPES = { direct: DirectPlannerEdge };
 
 function InspectorSection({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
   return (
@@ -391,19 +412,23 @@ export default function Home() {
     }
     return nodes.map((node) => ({
       ...node,
-      data: { ...node.data, flowDirection: layoutDirection },
       selected: node.id === selectedNodeId,
       hidden: hiddenKinds.includes(node.data.kind),
       style: { ...node.style, opacity: spotlightIds.size && !spotlightIds.has(node.id) ? .2 : 1, transition: "opacity 160ms ease" },
     }));
-  }, [edges, hiddenKinds, layoutDirection, nodes, selectedNodeId, spotlightSelection]);
+  }, [edges, hiddenKinds, nodes, selectedNodeId, spotlightSelection]);
   const canvasEdges = useMemo(() => {
     const hiddenNodeIds = new Set(nodes.filter((node) => hiddenKinds.includes(node.data.kind)).map((node) => node.id));
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
     return edges.map((item) => {
       const muted = Boolean(spotlightSelection && selectedNodeId && item.source !== selectedNodeId && item.target !== selectedNodeId);
-      return { ...item, hidden: hiddenNodeIds.has(item.source) || hiddenNodeIds.has(item.target), style: { ...item.style, opacity: muted ? .12 : 1, transition: "opacity 160ms ease" }, labelStyle: { ...item.labelStyle, opacity: muted ? .12 : 1 } };
+      const source = nodeById.get(item.source);
+      const target = nodeById.get(item.target);
+      const anchors = source && target ? getEdgeAnchors({ source: source.position, target: target.position, direction: layoutDirection, nodeWidth: NODE_W, nodeHeight: NODE_H }) : undefined;
+      const routeOffset = getEdgeCurveOffset(item, edges);
+      return { ...item, type: "direct" as const, data: { relationship: item.data?.relationship ?? "connects", payload: item.data?.payload ?? "", notes: item.data?.notes ?? "", routeOffset }, sourceHandle: anchors?.sourceHandle, targetHandle: anchors?.targetHandle, hidden: hiddenNodeIds.has(item.source) || hiddenNodeIds.has(item.target), style: { ...item.style, opacity: muted ? .12 : 1, transition: "opacity 160ms ease" }, labelStyle: { ...item.labelStyle, opacity: muted ? .12 : 1 } };
     });
-  }, [edges, hiddenKinds, nodes, selectedNodeId, spotlightSelection]);
+  }, [edges, hiddenKinds, layoutDirection, nodes, selectedNodeId, spotlightSelection]);
   const reviewNodes = useMemo<ReviewNode[]>(() => nodes.map((node) => ({ id: node.id, kind: node.data.kind, label: node.data.label, responsibility: node.data.responsibility, fileHint: node.data.fileHint, inputs: node.data.inputs, outputs: node.data.outputs, state: node.data.state, notes: node.data.notes })), [nodes]);
   const reviewEdges = useMemo<ReviewEdge[]>(() => edges.map((item, index) => ({ id: item.id || `edge-${index + 1}`, source: item.source, target: item.target, relationship: item.data?.relationship ?? String(item.label ?? "connects"), payload: item.data?.payload ?? "", notes: item.data?.notes ?? "" })), [edges]);
   const reviewModel = useMemo(() => buildTechnicalReview(project, reviewNodes, reviewEdges), [project, reviewEdges, reviewNodes]);
@@ -850,6 +875,7 @@ export default function Home() {
               nodes={canvasNodes}
               edges={canvasEdges}
               nodeTypes={NODE_TYPES}
+              edgeTypes={EDGE_TYPES}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
@@ -862,6 +888,7 @@ export default function Home() {
               fitViewOptions={{ padding: .16 }}
               minZoom={.2}
               maxZoom={1.8}
+              connectionMode={ConnectionMode.Loose}
               deleteKeyCode={["Backspace", "Delete"]}
             >
               <Background gap={24} size={1.15} color="rgba(92, 109, 129, .23)" />
