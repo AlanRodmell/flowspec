@@ -190,6 +190,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .import-note { margin: 8px 4px 0; color: #6b7889; font-size: var(--text-xs); line-height: 1.5; text-align: center; }
 .danger-icon { width: 31px; height: 31px; display: grid; place-items: center; border: 1px solid #f0d9d3; border-radius: 7px; background: #fff8f6; color: #b9563c; }
 .text-button { margin-top: 7px; padding: 2px 0; display: inline-flex; align-items: center; gap: 4px; border: 0; background: transparent; color: #536d92; font-size: var(--text-xs); font-weight: 740; }
+.inspector-back { max-width: 100%; margin: 0 0 12px; padding: 4px 0; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: #536d92; font-size: var(--text-xs); font-weight: 780; text-align: left; }
+.inspector-back:hover { color: var(--navy); }
 .inspector-header { margin-bottom: 14px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .inspector-header > div { min-width: 0; }
 .inspector-header h2 { margin: 7px 0 0; overflow-wrap: anywhere; font-size: 1.125rem; line-height: 1.25; letter-spacing: -.02em; }
@@ -217,6 +219,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .connection-row strong { font-size: var(--text-xs); }
 .connection-row small { color: #667386; font-size: .6875rem; }
 .connection-row > svg { color: #8995a4; }
+.edge-endpoints { margin-bottom: 11px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.edge-endpoints button { min-width: 0; min-height: 47px; padding: 6px 7px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 6px; border: 1px solid #dbe2e9; border-radius: 7px; background: #f8fafb; color: var(--ink); text-align: left; }
+.edge-endpoints button:hover { border-color: #aebdce; background: #fff; }
+.edge-endpoints button > span { grid-column: 1 / -1; color: #748194; text-transform: uppercase; font-size: .625rem; font-weight: 820; letter-spacing: .06em; }
+.edge-endpoints strong { overflow: hidden; font-size: .6875rem; text-overflow: ellipsis; white-space: nowrap; }
+.edge-endpoints svg { color: #8995a4; }
 .empty-section { margin: 0; padding: 10px; border: 1px dashed #ccd5df; border-radius: 8px; color: #718094; font-size: var(--text-xs); line-height: 1.5; }
 .compact-field { margin-top: 0; }
 .empty-inspector { min-height: 300px; display: grid; place-content: center; justify-items: center; gap: 7px; color: #8490a0; text-align: center; }
