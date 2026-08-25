@@ -331,6 +331,7 @@ export default function Home() {
   const [project, setProject] = useState(INITIAL_PROJECT);
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const [selectedEdgeId, setSelectedEdgeId] = useState<string>();
+  const [inspectorReturnNodeId, setInspectorReturnNodeId] = useState<string>();
   const [tab, setTab] = useState<PanelTab>("assistant");
   const [handoffSection, setHandoffSection] = useState<HandoffSection>("build");
   const [targetChat, setTargetChat] = useState<TargetChat>("copilot");
@@ -359,6 +360,9 @@ export default function Home() {
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId);
   const selectedEdge = edges.find((item) => item.id === selectedEdgeId);
+  const selectedEdgeSource = selectedEdge ? nodes.find((node) => node.id === selectedEdge.source) : undefined;
+  const selectedEdgeTarget = selectedEdge ? nodes.find((node) => node.id === selectedEdge.target) : undefined;
+  const inspectorReturnNode = nodes.find((node) => node.id === inspectorReturnNodeId);
   const selectedNodeMeta = selectedNode ? KIND_META[selectedNode.data.kind] : undefined;
   const SelectedNodeIcon = selectedNodeMeta?.icon;
   const selectedNodeConnections = selectedNode ? edges.filter((item) => item.source === selectedNode.id || item.target === selectedNode.id) : [];
@@ -396,6 +400,20 @@ export default function Home() {
   const openHandoff = (section: HandoffSection) => {
     setHandoffSection(section);
     setTab("assistant");
+  };
+
+  const inspectNode = (nodeId: string) => {
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(undefined);
+    setInspectorReturnNodeId(undefined);
+    setTab("inspect");
+  };
+
+  const inspectEdge = (edgeId: string, returnNodeId?: string) => {
+    setSelectedEdgeId(edgeId);
+    setSelectedNodeId(undefined);
+    setInspectorReturnNodeId(returnNodeId);
+    setTab("inspect");
   };
 
   useEffect(() => {
@@ -456,6 +474,7 @@ export default function Home() {
     setHiddenKinds((current) => current.filter((item) => item !== kind));
     setSelectedNodeId(id);
     setSelectedEdgeId(undefined);
+    setInspectorReturnNodeId(undefined);
     setTab("inspect");
     flash(`${KIND_META[kind].label} added to the centre of the canvas`);
     if (instance) {
@@ -470,6 +489,7 @@ export default function Home() {
     setEdges((current) => [...current, edge(id, connection.source!, connection.target!, "connects")]);
     setSelectedEdgeId(id);
     setSelectedNodeId(undefined);
+    setInspectorReturnNodeId(connection.source);
     setTab("inspect");
   }, [setEdges]);
 
@@ -492,9 +512,11 @@ export default function Home() {
       setNodes((current) => current.filter((node) => node.id !== selectedNodeId));
       setEdges((current) => current.filter((item) => item.source !== selectedNodeId && item.target !== selectedNodeId));
       setSelectedNodeId(undefined);
+      setInspectorReturnNodeId(undefined);
     } else if (selectedEdgeId) {
       setEdges((current) => current.filter((item) => item.id !== selectedEdgeId));
       setSelectedEdgeId(undefined);
+      setInspectorReturnNodeId(undefined);
     }
   };
 
@@ -594,6 +616,7 @@ export default function Home() {
       setLayoutDirection(saved.layoutDirection === "TB" ? "TB" : "RL");
       setSelectedNodeId(undefined);
       setSelectedEdgeId(undefined);
+      setInspectorReturnNodeId(undefined);
       flash("Plan loaded");
       window.setTimeout(() => void flowRef.current?.fitView({ padding: .18, duration: 400 }), 60);
     } catch {
@@ -646,6 +669,7 @@ export default function Home() {
       setSpotlightSelection(false);
       setSelectedNodeId(undefined);
       setSelectedEdgeId(undefined);
+      setInspectorReturnNodeId(undefined);
       const summary = `Imported ${importedNodes.length} nodes and ${importedEdges.length} connections`;
       setImportSummary(summary);
       setTab("inspect");
@@ -663,6 +687,7 @@ export default function Home() {
     setEdges([]);
     setSelectedNodeId("entry");
     setSelectedEdgeId(undefined);
+    setInspectorReturnNodeId(undefined);
     setImportError("");
     setImportSummary("");
     setAnalysisOutput("");
@@ -751,9 +776,9 @@ export default function Home() {
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               onInit={(instance) => { flowRef.current = instance; }}
-              onNodeClick={(_event, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(undefined); setTab("inspect"); }}
-              onEdgeClick={(_event, item) => { setSelectedEdgeId(item.id); setSelectedNodeId(undefined); setTab("inspect"); }}
-              onPaneClick={() => { setSelectedNodeId(undefined); setSelectedEdgeId(undefined); }}
+              onNodeClick={(_event, node) => inspectNode(node.id)}
+              onEdgeClick={(_event, item) => inspectEdge(item.id)}
+              onPaneClick={() => { setSelectedNodeId(undefined); setSelectedEdgeId(undefined); setInspectorReturnNodeId(undefined); }}
               onNodesDelete={(deleted) => { const ids = new Set(deleted.map((node) => node.id)); setEdges((current) => current.filter((item) => !ids.has(item.source) && !ids.has(item.target))); }}
               fitView
               fitViewOptions={{ padding: .16 }}
@@ -859,7 +884,7 @@ export default function Home() {
                       const incoming = item.target === selectedNode.id;
                       const peerId = incoming ? item.source : item.target;
                       const peer = nodes.find((node) => node.id === peerId);
-                      return <button className="connection-row" key={item.id} onClick={() => { setSelectedEdgeId(item.id); setSelectedNodeId(undefined); }}><span>{incoming ? "From" : "To"}</span><div><strong>{peer?.data.label ?? peerId}</strong><small>{item.data?.relationship ?? String(item.label ?? "connects")}{item.data?.payload ? ` · ${item.data.payload}` : ""}</small></div><ArrowRight size={14} /></button>;
+                      return <button className="connection-row" key={item.id} onClick={() => inspectEdge(item.id, selectedNode.id)}><span>{incoming ? "From" : "To"}</span><div><strong>{peer?.data.label ?? peerId}</strong><small>{item.data?.relationship ?? String(item.label ?? "connects")}{item.data?.payload ? ` · ${item.data.payload}` : ""}</small></div><ArrowRight size={14} /></button>;
                     })}</div> : <p className="empty-section">No connections yet. Drag between node handles on the canvas to add one.</p>}
                   </InspectorSection>
 
@@ -871,11 +896,16 @@ export default function Home() {
 
               {selectedEdge ? (
                 <>
+                  {inspectorReturnNode ? <button className="inspector-back" onClick={() => inspectNode(inspectorReturnNode.id)}><ArrowLeft size={14} /> Back to {inspectorReturnNode.data.label}</button> : null}
                   <div className="inspector-header">
-                    <div><span className="eyebrow">Connection</span><h2>{nodes.find((node) => node.id === selectedEdge.source)?.data.label} → {nodes.find((node) => node.id === selectedEdge.target)?.data.label}</h2></div>
+                    <div><span className="eyebrow">Connection</span><h2>{selectedEdgeSource?.data.label} → {selectedEdgeTarget?.data.label}</h2></div>
                     <button className="danger-icon" aria-label="Delete connection" onClick={deleteSelection}><Trash2 size={15} /></button>
                   </div>
                   <InspectorSection title="Data flow" description="Describe the direction and contract crossing this boundary.">
+                    <div className="edge-endpoints" aria-label="Connected components">
+                      <button onClick={() => inspectNode(selectedEdge.source)}><span>Source</span><strong>{selectedEdgeSource?.data.label ?? selectedEdge.source}</strong><ArrowRight size={13} /></button>
+                      <button onClick={() => inspectNode(selectedEdge.target)}><span>Target</span><strong>{selectedEdgeTarget?.data.label ?? selectedEdge.target}</strong><ArrowRight size={13} /></button>
+                    </div>
                     <div className="form-grid">
                       <label>Relationship<input list="relationship-options" value={selectedEdge.data?.relationship ?? "connects"} onChange={(event) => updateEdge({ relationship: event.target.value })} /><datalist id="relationship-options">{RELATIONSHIPS.map((relationship) => <option value={relationship} key={relationship} />)}</datalist></label>
                       <label>Props, event or payload<input value={selectedEdge.data?.payload ?? ""} placeholder="filters: ProductFilters" onChange={(event) => updateEdge({ payload: event.target.value })} /></label>
