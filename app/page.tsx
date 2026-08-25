@@ -26,6 +26,7 @@ import {
   Braces,
   Check,
   ChevronDown,
+  ClipboardCheck,
   Cloud,
   Component,
   Copy,
@@ -54,9 +55,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import "@xyflow/react/dist/style.css";
-import { getNewNodePosition } from "./flowspec-canvas";
+import { getNewNodePosition, sortByHierarchy } from "./flowspec-canvas";
+import { GuidedPlanner, type GuidedNodeInput } from "./guided-planner";
 import { buildMermaidFlow, buildRepoAnalysisPrompt, buildTechnicalDocument, parseRepoAnalysis, type FlowDirection, type RepoNodeKind } from "./flowspec-import";
+import { buildTechnicalReview, type ReviewEdge, type ReviewNode } from "./flowspec-review";
 import { decodeSharePayload, encodeSharePayload } from "./flowspec-share";
+import { TechnicalReview } from "./technical-review";
 
 type NodeKind = RepoNodeKind;
 type PanelTab = "assistant" | "inspect" | "brief";
@@ -64,6 +68,7 @@ type HandoffSection = "build" | "map";
 type OutputFormat = "markdown-mermaid" | "checklist" | "json" | "decision-record";
 type TargetChat = "copilot" | "codex" | "generic";
 type LayoutDirection = Extract<FlowDirection, "RL" | "TB">;
+type WorkspaceMode = "start" | "planner" | "guided" | "review";
 
 interface PlannerNodeData extends Record<string, unknown> {
   label: string;
@@ -74,6 +79,7 @@ interface PlannerNodeData extends Record<string, unknown> {
   inputs: string[];
   outputs: string[];
   notes: string;
+  flowDirection?: LayoutDirection;
 }
 
 interface PlannerEdgeData extends Record<string, unknown> {
@@ -180,11 +186,11 @@ const makeNodeData = (kind: NodeKind, label?: string): PlannerNodeData => ({
 });
 
 const INITIAL_NODES: FlowNode[] = [
-  { id: "route", type: "planner", position: { x: 30, y: 175 }, data: { ...makeNodeData("route", "Product route"), responsibility: "Owns URL search parameters and the page entry.", outputs: ["filter params"] } },
-  { id: "page", type: "planner", position: { x: 330, y: 70 }, data: { ...makeNodeData("component", "Product page"), responsibility: "Composes filters, results and page-level states.", inputs: ["filter params"], outputs: ["rendered products"] } },
-  { id: "filters", type: "planner", position: { x: 330, y: 285 }, data: { ...makeNodeData("component", "Filter controls"), responsibility: "Edits filter values and emits user intent.", inputs: ["active filters"], outputs: ["onFilterChange"] } },
-  { id: "query", type: "planner", position: { x: 650, y: 175 }, data: { ...makeNodeData("hook", "useProductsQuery"), responsibility: "Builds the query key and exposes server state.", inputs: ["filter params"], outputs: ["data", "status", "retry"], state: ["server cache"] } },
-  { id: "api", type: "planner", position: { x: 950, y: 175 }, data: { ...makeNodeData("api", "Products API"), responsibility: "Returns filtered product results.", inputs: ["query parameters"], outputs: ["products", "metadata"] } },
+  { id: "route", type: "planner", position: { x: 950, y: 175 }, data: { ...makeNodeData("route", "Product route"), responsibility: "Owns URL search parameters and the page entry.", outputs: ["filter params"] } },
+  { id: "page", type: "planner", position: { x: 650, y: 70 }, data: { ...makeNodeData("component", "Product page"), responsibility: "Composes filters, results and page-level states.", inputs: ["filter params"], outputs: ["rendered products"] } },
+  { id: "filters", type: "planner", position: { x: 650, y: 285 }, data: { ...makeNodeData("component", "Filter controls"), responsibility: "Edits filter values and emits user intent.", inputs: ["active filters"], outputs: ["onFilterChange"] } },
+  { id: "query", type: "planner", position: { x: 330, y: 175 }, data: { ...makeNodeData("hook", "useProductsQuery"), responsibility: "Builds the query key and exposes server state.", inputs: ["filter params"], outputs: ["data", "status", "retry"], state: ["server cache"] } },
+  { id: "api", type: "planner", position: { x: 30, y: 175 }, data: { ...makeNodeData("api", "Products API"), responsibility: "Returns filtered product results.", inputs: ["query parameters"], outputs: ["products", "metadata"] } },
 ];
 
 const edge = (id: string, source: string, target: string, relationship: string, payload = ""): FlowEdge => ({
@@ -228,14 +234,17 @@ async function writeClipboard(value: string): Promise<void> {
 function PlannerNodeCard({ data, selected }: NodeProps<FlowNode>) {
   const meta = KIND_META[data.kind];
   const Icon = meta.icon;
+  const vertical = data.flowDirection === "TB";
+  const targetPosition = vertical ? Position.Top : Position.Right;
+  const sourcePosition = vertical ? Position.Bottom : Position.Left;
   return (
     <div className={`planner-node-card${selected ? " selected" : ""}`} style={{ "--node-color": meta.color } as React.CSSProperties}>
-      <Handle type="target" position={Position.Left} className="node-handle" />
+      <Handle type="target" position={targetPosition} className="node-handle" />
       <div className="node-kind"><Icon size={12} /> {meta.label}</div>
       <strong>{data.label}</strong>
       <p>{data.responsibility || "No responsibility described."}</p>
       <div className="node-meta"><span>{data.inputs.filter((item) => item.trim()).length} in</span><span>{data.outputs.filter((item) => item.trim()).length} out</span><span>{data.state.filter((item) => item.trim()).length} state</span></div>
-      <Handle type="source" position={Position.Right} className="node-handle" />
+      <Handle type="source" position={sourcePosition} className="node-handle" />
     </div>
   );
 }
@@ -316,8 +325,12 @@ function layoutGraph(nodes: FlowNode[], edges: FlowEdge[], direction: LayoutDire
   const graph = new dagre.graphlib.Graph();
   graph.setDefaultEdgeLabel(() => ({}));
   graph.setGraph({ rankdir: direction, ranksep: 86, nodesep: 48, marginx: 34, marginy: 34 });
-  nodes.forEach((node) => graph.setNode(node.id, { width: NODE_W, height: NODE_H }));
-  edges.forEach((item) => graph.setEdge(item.source, item.target));
+  sortByHierarchy(nodes).forEach((node) => graph.setNode(node.id, { width: NODE_W, height: NODE_H }));
+  edges.forEach((item) => {
+    const relationship = (item.data?.relationship ?? String(item.label ?? "")).toLowerCase();
+    const feedback = relationship.includes("callback") || relationship.startsWith("returns") || relationship.startsWith("emits");
+    graph.setEdge(item.source, item.target, { weight: feedback ? .25 : 2, minlen: 1 });
+  });
   dagre.layout(graph);
   return nodes.map((node) => {
     const point = graph.node(node.id) as { x: number; y: number };
@@ -333,6 +346,7 @@ export default function Home() {
   const [selectedEdgeId, setSelectedEdgeId] = useState<string>();
   const [inspectorReturnNodeId, setInspectorReturnNodeId] = useState<string>();
   const [tab, setTab] = useState<PanelTab>("assistant");
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("start");
   const [handoffSection, setHandoffSection] = useState<HandoffSection>("build");
   const [targetChat, setTargetChat] = useState<TargetChat>("copilot");
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("markdown-mermaid");
@@ -377,11 +391,12 @@ export default function Home() {
     }
     return nodes.map((node) => ({
       ...node,
+      data: { ...node.data, flowDirection: layoutDirection },
       selected: node.id === selectedNodeId,
       hidden: hiddenKinds.includes(node.data.kind),
       style: { ...node.style, opacity: spotlightIds.size && !spotlightIds.has(node.id) ? .2 : 1, transition: "opacity 160ms ease" },
     }));
-  }, [edges, hiddenKinds, nodes, selectedNodeId, spotlightSelection]);
+  }, [edges, hiddenKinds, layoutDirection, nodes, selectedNodeId, spotlightSelection]);
   const canvasEdges = useMemo(() => {
     const hiddenNodeIds = new Set(nodes.filter((node) => hiddenKinds.includes(node.data.kind)).map((node) => node.id));
     return edges.map((item) => {
@@ -389,6 +404,9 @@ export default function Home() {
       return { ...item, hidden: hiddenNodeIds.has(item.source) || hiddenNodeIds.has(item.target), style: { ...item.style, opacity: muted ? .12 : 1, transition: "opacity 160ms ease" }, labelStyle: { ...item.labelStyle, opacity: muted ? .12 : 1 } };
     });
   }, [edges, hiddenKinds, nodes, selectedNodeId, spotlightSelection]);
+  const reviewNodes = useMemo<ReviewNode[]>(() => nodes.map((node) => ({ id: node.id, kind: node.data.kind, label: node.data.label, responsibility: node.data.responsibility, fileHint: node.data.fileHint, inputs: node.data.inputs, outputs: node.data.outputs, state: node.data.state, notes: node.data.notes })), [nodes]);
+  const reviewEdges = useMemo<ReviewEdge[]>(() => edges.map((item, index) => ({ id: item.id || `edge-${index + 1}`, source: item.source, target: item.target, relationship: item.data?.relationship ?? String(item.label ?? "connects"), payload: item.data?.payload ?? "", notes: item.data?.notes ?? "" })), [edges]);
+  const reviewModel = useMemo(() => buildTechnicalReview(project, reviewNodes, reviewEdges), [project, reviewEdges, reviewNodes]);
   const prompt = useMemo(() => buildPrompt({ project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements }), [customAnalysis, edges, focus, nodes, outputFormat, outputRequirements, project, targetChat]);
   const analysisPrompt = useMemo(() => buildRepoAnalysisPrompt(targetChat === "copilot" ? "GitHub Copilot Chat" : targetChat === "codex" ? "Codex" : "the coding assistant", repoScope), [repoScope, targetChat]);
 
@@ -399,10 +417,12 @@ export default function Home() {
 
   const openHandoff = (section: HandoffSection) => {
     setHandoffSection(section);
+    setWorkspaceMode("planner");
     setTab("assistant");
   };
 
   const inspectNode = (nodeId: string) => {
+    setWorkspaceMode("planner");
     setSelectedNodeId(nodeId);
     setSelectedEdgeId(undefined);
     setInspectorReturnNodeId(undefined);
@@ -410,6 +430,7 @@ export default function Home() {
   };
 
   const inspectEdge = (edgeId: string, returnNodeId?: string) => {
+    setWorkspaceMode("planner");
     setSelectedEdgeId(edgeId);
     setSelectedNodeId(undefined);
     setInspectorReturnNodeId(returnNodeId);
@@ -436,6 +457,7 @@ export default function Home() {
           setHiddenKinds((saved.hiddenKinds ?? []).filter((kind): kind is NodeKind => kind in KIND_META));
           setSpotlightSelection(saved.spotlightSelection ?? false);
           setLayoutDirection(saved.layoutDirection === "TB" ? "TB" : "RL");
+          if (sharedPayload) setWorkspaceMode("planner");
           if (sharedPayload) flash("Shared plan loaded — this is now your editable copy");
         } else if (sharedPayload) {
           throw new Error("Invalid shared plan");
@@ -483,6 +505,39 @@ export default function Home() {
     }
   };
 
+  const addGuidedNode = (input: GuidedNodeInput): string => {
+    const id = uid(input.kind);
+    const node: FlowNode = {
+      id,
+      type: "planner",
+      position: { x: 100, y: 100 },
+      data: {
+        ...makeNodeData(input.kind, input.label),
+        responsibility: input.responsibility,
+        inputs: input.inputs.map((item) => item.trim()).filter(Boolean),
+        outputs: input.outputs.map((item) => item.trim()).filter(Boolean),
+        state: input.state.map((item) => item.trim()).filter(Boolean),
+      },
+    };
+    const guidedEdge = input.linkNodeId ? edge(
+      uid("edge"),
+      input.direction === "from-existing" ? input.linkNodeId : id,
+      input.direction === "from-existing" ? id : input.linkNodeId,
+      input.relationship || "connects",
+      input.payload.trim(),
+    ) : undefined;
+    const nextEdges = guidedEdge ? [...edges, guidedEdge] : edges;
+    setNodes((current) => layoutGraph([...current, node], nextEdges, layoutDirection));
+    if (guidedEdge) setEdges(nextEdges);
+    setHiddenKinds((current) => current.filter((item) => item !== input.kind));
+    setSelectedNodeId(id);
+    setSelectedEdgeId(undefined);
+    setInspectorReturnNodeId(undefined);
+    flash(`${input.label} added to the plan`);
+    window.setTimeout(() => void flowRef.current?.fitView({ padding: .18, duration: 450 }), 50);
+    return id;
+  };
+
   const onConnect = useCallback((connection: Connection) => {
     if (!connection.source || !connection.target || connection.source === connection.target) return;
     const id = uid("edge");
@@ -523,6 +578,7 @@ export default function Home() {
   const autoLayout = () => {
     setNodes((current) => layoutGraph(current, edges, layoutDirection));
     window.setTimeout(() => void flowRef.current?.fitView({ padding: .18, duration: 400 }), 30);
+    flash("Canvas arranged by architectural hierarchy");
   };
 
   const changeLayoutDirection = (direction: LayoutDirection) => {
@@ -585,12 +641,16 @@ export default function Home() {
   };
 
   const exportTechnicalDoc = () => {
-    const document = buildTechnicalDocument(
+    const overview = buildTechnicalDocument(
       project,
       nodes.map((node) => ({ id: node.id, label: node.data.label, kind: node.data.kind, responsibility: node.data.responsibility, fileHint: node.data.fileHint, inputs: node.data.inputs, outputs: node.data.outputs, state: node.data.state, notes: node.data.notes })),
       edges.map((item, index) => ({ id: item.id || `edge-${index + 1}`, source: item.source, target: item.target, relationship: item.data?.relationship ?? String(item.label ?? "connects"), payload: item.data?.payload ?? "", notes: item.data?.notes ?? "" })),
       layoutDirection,
     );
+    const findings = reviewModel.gaps.length
+      ? reviewModel.gaps.map((gap) => `- **${gap.severity === "review" ? "Review" : "Note"} · ${gap.area}:** ${gap.title} — ${gap.detail}`).join("\n")
+      : "- No planning gaps detected.";
+    const document = `${overview.trim()}\n\n## Review findings\n\n${findings}\n`;
     download(document, `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "flowspec"}-technical-overview.md`, "text/markdown");
     setExportMenuOpen(false);
     flash("Technical document downloaded");
@@ -695,6 +755,7 @@ export default function Home() {
     setHiddenKinds([]);
     setSpotlightSelection(false);
     setLayoutDirection("RL");
+    setWorkspaceMode("start");
     setTab("brief");
   };
 
@@ -714,13 +775,30 @@ export default function Home() {
         </div>
       </header>
 
+      {workspaceMode === "start" ? <section className="start-workspace">
+        <div className="start-workspace-heading"><span className="eyebrow">Choose your planning path</span><h1>How do you want to build this plan?</h1><p>Both paths create the same editable diagram, Technical Review and build prompt.</p></div>
+        <div className="start-choice-grid">
+          <button className="start-choice guided" onClick={() => setWorkspaceMode("guided")}><span><Sparkles size={20} /></span><div><strong>Guided build</strong><p>Answer simple questions about components, hierarchy, props, callbacks and data links.</p><em>Best for planning a page step by step <ArrowRight size={14} /></em></div></button>
+          <button className="start-choice manual" onClick={() => setWorkspaceMode("planner")}><span><LayoutGrid size={20} /></span><div><strong>Build it yourself</strong><p>Add and connect nodes directly, or import repository analysis from VS Code chat.</p><em>Open the freeform canvas <ArrowRight size={14} /></em></div></button>
+        </div>
+        <div className="start-existing"><div><span>Current local plan</span><strong>{project.title}</strong><small>{nodes.length} nodes · {edges.length} connections</small></div><button className="button" onClick={() => setWorkspaceMode("planner")}>Continue plan <ArrowRight size={14} /></button><button className="button ghost" onClick={() => openHandoff("map")}><Network size={14} /> Import repo</button></div>
+      </section> : <>
       <section className="brief-bar">
         <div className="brief-title"><span className="eyebrow">Plan</span><input value={project.title} onChange={(event) => setProject({ ...project, title: event.target.value })} aria-label="Plan title" /></div>
         <div className="brief-objective"><span className="eyebrow">Objective</span><input value={project.objective} onChange={(event) => setProject({ ...project, objective: event.target.value })} placeholder="What are you planning to build?" aria-label="Project objective" /></div>
-        <button className="brief-edit" onClick={() => setTab("brief")}>Edit brief <ArrowRight size={14} /></button>
+        <button className="brief-edit" onClick={() => { setWorkspaceMode("planner"); setTab("brief"); }}>Edit brief <ArrowRight size={14} /></button>
       </section>
 
-      <div className="planner-layout">
+      <nav className="workspace-mode-bar" aria-label="FlowSpec workspace">
+        <div className="workspace-mode-tabs">
+          <button className={workspaceMode === "planner" ? "active" : ""} aria-current={workspaceMode === "planner" ? "page" : undefined} onClick={() => setWorkspaceMode("planner")}><LayoutGrid size={14} /> Plan canvas</button>
+          <button className={workspaceMode === "guided" ? "active" : ""} aria-current={workspaceMode === "guided" ? "page" : undefined} onClick={() => setWorkspaceMode("guided")}><Sparkles size={14} /> Guided build</button>
+          <button className={workspaceMode === "review" ? "active" : ""} aria-current={workspaceMode === "review" ? "page" : undefined} onClick={() => setWorkspaceMode("review")}><ClipboardCheck size={14} /> Technical review{reviewModel.gaps.length ? <span>{reviewModel.gaps.length}</span> : <Check size={13} />}</button>
+        </div>
+        <p>{workspaceMode === "review" ? "Generated from the current plan · read-only" : workspaceMode === "guided" ? "Simple choices update the same editable plan" : "Build freely or use Hierarchy to order the flow"}</p>
+      </nav>
+
+      {workspaceMode === "planner" ? <div className="planner-layout">
         <aside className="palette-panel">
           <div className="palette-heading"><Boxes size={15} /><span>Building blocks</span></div>
           <p>Click to add at the centre of the canvas, then edit it in the Inspector.</p>
@@ -738,7 +816,7 @@ export default function Home() {
           <div className="canvas-toolbar">
             <div className="canvas-actions">
               <button className="toolbar-button" onClick={() => addNode("component")}><Plus size={14} /> Node</button>
-              <button className="toolbar-button" onClick={autoLayout}><LayoutGrid size={14} /> Arrange</button>
+              <button className="toolbar-button" onClick={autoLayout} title="Order routes, components, logic, services and boundaries"><LayoutGrid size={14} /> Hierarchy</button>
               <button className="toolbar-button" onClick={() => flowRef.current?.fitView({ padding: .18, duration: 350 })}><Maximize2 size={14} /> Fit</button>
               <div className="view-control">
                 <button className={`toolbar-button${hiddenKinds.length || spotlightSelection || !showEdgeLabels ? " active" : ""}`} aria-expanded={viewMenuOpen} onClick={() => setViewMenuOpen((current) => !current)}><SlidersHorizontal size={14} /> View</button>
@@ -923,8 +1001,9 @@ export default function Home() {
             <div className="panel-scroll brief-editor"><div className="section-title"><div><span className="eyebrow">Briefing</span><h2>Set the project context</h2></div><button className="section-action" onClick={() => openHandoff("build")}><Check size={13} /> Done</button></div><p className="panel-intro">This context guides the generated implementation prompt. Edit it here, then select Done when it is ready.</p><div className="form-grid"><label>Plan title<input value={project.title} onChange={(event) => setProject({ ...project, title: event.target.value })} /></label><label>Objective<textarea rows={3} value={project.objective} onChange={(event) => setProject({ ...project, objective: event.target.value })} placeholder="What should change and why?" /></label><label>Current understanding<textarea rows={4} value={project.existingContext} onChange={(event) => setProject({ ...project, existingContext: event.target.value })} placeholder="What do you already know about the existing flow?" /></label><label>Stack and conventions<input value={project.stack} onChange={(event) => setProject({ ...project, stack: event.target.value })} /></label><label>Constraints<textarea rows={4} value={project.constraints} onChange={(event) => setProject({ ...project, constraints: event.target.value })} placeholder="Compatibility, deadlines, architecture rules…" /></label></div></div>
           ) : null}
         </aside>
-      </div>
-      <footer className="statusbar"><span><i /> Local-first · repository analysis via VS Code chat</span><span>{nodes.length} nodes · {edges.length} connections · {OUTPUT_LABELS[outputFormat]}</span></footer>
+      </div> : workspaceMode === "guided" ? <GuidedPlanner nodes={reviewNodes} relationships={RELATIONSHIPS} onAdd={addGuidedNode} onOpenCanvas={() => setWorkspaceMode("planner")} onOpenReview={() => setWorkspaceMode("review")} /> : <TechnicalReview project={project} nodes={reviewNodes} edges={reviewEdges} onEditPlan={() => setWorkspaceMode("planner")} onInspectNode={inspectNode} onInspectEdge={inspectEdge} onExport={exportTechnicalDoc} />}
+      </>}
+      <footer className="statusbar"><span><i /> Local-first · repository analysis via VS Code chat</span><span>{workspaceMode === "start" ? "Guided or freeform planning" : workspaceMode === "review" ? `${reviewModel.reviewGapCount} review gaps · ${reviewModel.gaps.length - reviewModel.reviewGapCount} notes` : `${nodes.length} nodes · ${edges.length} connections · ${OUTPUT_LABELS[outputFormat]}`}</span></footer>
       {toast ? <div className="toast">{toast}</div> : null}
     </main>
   );
