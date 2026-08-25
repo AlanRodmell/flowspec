@@ -20,15 +20,21 @@ import {
 } from "@xyflow/react";
 import {
   ArrowRight,
+  ArrowDown,
+  ArrowLeft,
   Boxes,
   Braces,
   Check,
+  ChevronDown,
   Cloud,
   Component,
   Copy,
   Database,
   Download,
+  Eye,
+  EyeOff,
   FileJson,
+  FileText,
   FolderOpen,
   Globe2,
   LayoutGrid,
@@ -38,21 +44,25 @@ import {
   Route,
   Save,
   ServerCog,
+  Share2,
+  SlidersHorizontal,
   Sparkles,
   TestTube2,
   Trash2,
   Upload,
   Webhook,
-  X,
   type LucideIcon,
 } from "lucide-react";
 import "@xyflow/react/dist/style.css";
-import { buildMermaidFlow, buildRepoAnalysisPrompt, parseRepoAnalysis, type RepoNodeKind } from "./flowspec-import";
+import { buildMermaidFlow, buildRepoAnalysisPrompt, buildTechnicalDocument, parseRepoAnalysis, type FlowDirection, type RepoNodeKind } from "./flowspec-import";
+import { decodeSharePayload, encodeSharePayload } from "./flowspec-share";
 
 type NodeKind = RepoNodeKind;
-type PanelTab = "prompt" | "import" | "inspect" | "brief";
+type PanelTab = "assistant" | "inspect" | "brief";
+type HandoffSection = "build" | "map";
 type OutputFormat = "markdown-mermaid" | "checklist" | "json" | "decision-record";
 type TargetChat = "copilot" | "codex" | "generic";
+type LayoutDirection = Extract<FlowDirection, "RL" | "TB">;
 
 interface PlannerNodeData extends Record<string, unknown> {
   label: string;
@@ -93,9 +103,15 @@ interface SavedPlan {
   customAnalysis: string;
   outputRequirements: string;
   repoScope?: string;
+  showEdgeLabels?: boolean;
+  hiddenKinds?: NodeKind[];
+  spotlightSelection?: boolean;
+  layoutDirection?: LayoutDirection;
 }
 
 const STORAGE_KEY = "flowspec-plan-v1";
+const SHARE_BASE_URL = "https://alanrodmell.github.io/flowspec/";
+const MAX_SHARE_URL_LENGTH = 100_000;
 const NODE_W = 248;
 const NODE_H = 166;
 
@@ -195,6 +211,19 @@ function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
+async function writeClipboard(value: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+}
+
 function PlannerNodeCard({ data, selected }: NodeProps<FlowNode>) {
   const meta = KIND_META[data.kind];
   const Icon = meta.icon;
@@ -204,7 +233,7 @@ function PlannerNodeCard({ data, selected }: NodeProps<FlowNode>) {
       <div className="node-kind"><Icon size={12} /> {meta.label}</div>
       <strong>{data.label}</strong>
       <p>{data.responsibility || "No responsibility described."}</p>
-      <div className="node-meta"><span>{data.inputs.length} in</span><span>{data.outputs.length} out</span><span>{data.state.length} state</span></div>
+      <div className="node-meta"><span>{data.inputs.filter((item) => item.trim()).length} in</span><span>{data.outputs.filter((item) => item.trim()).length} out</span><span>{data.state.filter((item) => item.trim()).length} state</span></div>
       <Handle type="source" position={Position.Right} className="node-handle" />
     </div>
   );
@@ -212,18 +241,21 @@ function PlannerNodeCard({ data, selected }: NodeProps<FlowNode>) {
 
 const NODE_TYPES = { planner: PlannerNodeCard };
 
-function ListEditor({ title, items, placeholder, onChange }: { title: string; items: string[]; placeholder: string; onChange: (items: string[]) => void }) {
+function InspectorSection({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
   return (
-    <div className="list-editor">
-      <label>{title}</label>
-      {items.map((item, index) => (
-        <div className="inline-field" key={`${title}-${index}`}>
-          <input value={item} placeholder={placeholder} onChange={(event) => onChange(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} />
-          <button aria-label={`Remove ${title} item`} onClick={() => onChange(items.filter((_, itemIndex) => itemIndex !== index))}><X size={13} /></button>
-        </div>
-      ))}
-      <button className="text-button" onClick={() => onChange([...items, ""])}><Plus size={13} /> Add {title.toLowerCase()}</button>
-    </div>
+    <section className="inspector-section">
+      <div className="inspector-section-heading"><h3>{title}</h3><p>{description}</p></div>
+      {children}
+    </section>
+  );
+}
+
+function ContractEditor({ title, hint, items, placeholder, onChange }: { title: string; hint: string; items: string[]; placeholder: string; onChange: (items: string[]) => void }) {
+  return (
+    <label className="contract-field">
+      <span><strong>{title}</strong><small>{hint}</small></span>
+      <textarea rows={2} value={items.join("\n")} placeholder={`${placeholder}\nOne item per line`} onChange={(event) => onChange(event.target.value.split("\n"))} />
+    </label>
   );
 }
 
@@ -279,10 +311,10 @@ function buildPrompt(args: {
   return `Use ${targetName} to inspect the React repository currently open in VS Code and produce an implementation-ready analysis.\n\nTASK\n${project.objective || "Analyse and plan the described React change."}\n\nPROJECT CONTEXT\n- Plan: ${project.title || "Untitled plan"}\n- Current understanding: ${project.existingContext || "Not supplied; establish this from repository evidence."}\n- Stack: ${project.stack || "Confirm from the repository."}\n- Constraints: ${project.constraints || "No additional constraints supplied."}\n\nINTENDED DESIGN (treat this as proposed context, not proof that code exists)\nComponents and boundaries:\n${nodeLines || "- No planned nodes supplied."}\n\nConnections and data flow:\n${edgeLines || "- No planned connections supplied."}\n\nANALYSE\n${focusLines || "- Reconcile the intended design with the current repository."}${customAnalysis.trim() ? `\n- ${customAnalysis.trim()}` : ""}\n\nRESPONSE CONTRACT\n${outputContract(outputFormat)}${outputRequirements.trim() ? `\nAdditional output requirements: ${outputRequirements.trim()}` : ""}\n\nRULES\n- Inspect the repository before recommending changes; do not rely only on this brief.\n- Cite repository-relative paths and 1-based line numbers for important current-flow claims.\n- Clearly distinguish observed code, reasonable inference, and proposed design.\n- Reconcile naming with existing conventions and identify anything in this plan that conflicts with the codebase.\n- Prefer the smallest coherent implementation and avoid duplicating state.\n- Be concise: include only information needed to make and verify the change.\n- Do not implement code unless explicitly asked after the plan is reviewed.`;
 }
 
-function layoutGraph(nodes: FlowNode[], edges: FlowEdge[]): FlowNode[] {
+function layoutGraph(nodes: FlowNode[], edges: FlowEdge[], direction: LayoutDirection): FlowNode[] {
   const graph = new dagre.graphlib.Graph();
   graph.setDefaultEdgeLabel(() => ({}));
-  graph.setGraph({ rankdir: "LR", ranksep: 86, nodesep: 48, marginx: 34, marginy: 34 });
+  graph.setGraph({ rankdir: direction, ranksep: 86, nodesep: 48, marginx: 34, marginy: 34 });
   nodes.forEach((node) => graph.setNode(node.id, { width: NODE_W, height: NODE_H }));
   edges.forEach((item) => graph.setEdge(item.source, item.target));
   dagre.layout(graph);
@@ -298,7 +330,8 @@ export default function Home() {
   const [project, setProject] = useState(INITIAL_PROJECT);
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const [selectedEdgeId, setSelectedEdgeId] = useState<string>();
-  const [tab, setTab] = useState<PanelTab>("prompt");
+  const [tab, setTab] = useState<PanelTab>("assistant");
+  const [handoffSection, setHandoffSection] = useState<HandoffSection>("build");
   const [targetChat, setTargetChat] = useState<TargetChat>("copilot");
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("markdown-mermaid");
   const [focus, setFocus] = useState<string[]>(DEFAULT_FOCUS);
@@ -308,6 +341,12 @@ export default function Home() {
   const [analysisOutput, setAnalysisOutput] = useState("");
   const [importError, setImportError] = useState("");
   const [importSummary, setImportSummary] = useState("");
+  const [showEdgeLabels, setShowEdgeLabels] = useState(true);
+  const [hiddenKinds, setHiddenKinds] = useState<NodeKind[]>([]);
+  const [spotlightSelection, setSpotlightSelection] = useState(false);
+  const [layoutDirection, setLayoutDirection] = useState<LayoutDirection>("RL");
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [copied, setCopied] = useState<"build" | "analysis">();
   const [toast, setToast] = useState("");
   const [savedAt, setSavedAt] = useState<string>();
@@ -318,6 +357,31 @@ export default function Home() {
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId);
   const selectedEdge = edges.find((item) => item.id === selectedEdgeId);
+  const selectedNodeMeta = selectedNode ? KIND_META[selectedNode.data.kind] : undefined;
+  const SelectedNodeIcon = selectedNodeMeta?.icon;
+  const selectedNodeConnections = selectedNode ? edges.filter((item) => item.source === selectedNode.id || item.target === selectedNode.id) : [];
+  const canvasNodes = useMemo(() => {
+    const spotlightIds = new Set<string>();
+    if (spotlightSelection && selectedNodeId) {
+      spotlightIds.add(selectedNodeId);
+      edges.forEach((item) => {
+        if (item.source === selectedNodeId) spotlightIds.add(item.target);
+        if (item.target === selectedNodeId) spotlightIds.add(item.source);
+      });
+    }
+    return nodes.map((node) => ({
+      ...node,
+      hidden: hiddenKinds.includes(node.data.kind),
+      style: { ...node.style, opacity: spotlightIds.size && !spotlightIds.has(node.id) ? .2 : 1, transition: "opacity 160ms ease" },
+    }));
+  }, [edges, hiddenKinds, nodes, selectedNodeId, spotlightSelection]);
+  const canvasEdges = useMemo(() => {
+    const hiddenNodeIds = new Set(nodes.filter((node) => hiddenKinds.includes(node.data.kind)).map((node) => node.id));
+    return edges.map((item) => {
+      const muted = Boolean(spotlightSelection && selectedNodeId && item.source !== selectedNodeId && item.target !== selectedNodeId);
+      return { ...item, hidden: hiddenNodeIds.has(item.source) || hiddenNodeIds.has(item.target), style: { ...item.style, opacity: muted ? .12 : 1, transition: "opacity 160ms ease" }, labelStyle: { ...item.labelStyle, opacity: muted ? .12 : 1 } };
+    });
+  }, [edges, hiddenKinds, nodes, selectedNodeId, spotlightSelection]);
   const prompt = useMemo(() => buildPrompt({ project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements }), [customAnalysis, edges, focus, nodes, outputFormat, outputRequirements, project, targetChat]);
   const analysisPrompt = useMemo(() => buildRepoAnalysisPrompt(targetChat === "copilot" ? "GitHub Copilot Chat" : targetChat === "codex" ? "Codex" : "the coding assistant", repoScope), [repoScope, targetChat]);
 
@@ -326,42 +390,54 @@ export default function Home() {
     window.setTimeout(() => setToast(""), 2200);
   }, []);
 
+  const openHandoff = (section: HandoffSection) => {
+    setHandoffSection(section);
+    setTab("assistant");
+  };
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
+      const sharedPayload = new URLSearchParams(window.location.hash.slice(1)).get("plan");
       try {
-        const raw = window.localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const saved = JSON.parse(raw) as SavedPlan;
-          if (saved.version === 1 && Array.isArray(saved.nodes) && Array.isArray(saved.edges)) {
-            setProject(saved.project);
-            setNodes(saved.nodes);
-            setEdges(saved.edges);
-            setTargetChat(saved.targetChat ?? "copilot");
-            setOutputFormat(saved.outputFormat ?? "markdown-mermaid");
-            setFocus(saved.focus ?? DEFAULT_FOCUS);
-            setCustomAnalysis(saved.customAnalysis ?? "");
-            setOutputRequirements(saved.outputRequirements ?? "");
-            setRepoScope(saved.repoScope ?? DEFAULT_REPO_SCOPE);
-          }
+        const raw = sharedPayload ? undefined : window.localStorage.getItem(STORAGE_KEY);
+        const saved = sharedPayload ? decodeSharePayload<SavedPlan>(sharedPayload) : raw ? JSON.parse(raw) as SavedPlan : undefined;
+        if (saved && saved.version === 1 && Array.isArray(saved.nodes) && Array.isArray(saved.edges)) {
+          setProject(saved.project);
+          setNodes(saved.nodes);
+          setEdges(saved.edges);
+          setTargetChat(saved.targetChat ?? "copilot");
+          setOutputFormat(saved.outputFormat ?? "markdown-mermaid");
+          setFocus(saved.focus ?? DEFAULT_FOCUS);
+          setCustomAnalysis(saved.customAnalysis ?? "");
+          setOutputRequirements(saved.outputRequirements ?? "");
+          setRepoScope(saved.repoScope ?? DEFAULT_REPO_SCOPE);
+          setShowEdgeLabels(saved.showEdgeLabels ?? true);
+          setHiddenKinds((saved.hiddenKinds ?? []).filter((kind): kind is NodeKind => kind in KIND_META));
+          setSpotlightSelection(saved.spotlightSelection ?? false);
+          setLayoutDirection(saved.layoutDirection === "TB" ? "TB" : "RL");
+          if (sharedPayload) flash("Shared plan loaded — this is now your editable copy");
+        } else if (sharedPayload) {
+          throw new Error("Invalid shared plan");
         }
       } catch {
-        window.localStorage.removeItem(STORAGE_KEY);
+        if (sharedPayload) flash("This FlowSpec share link is incomplete or invalid");
+        else window.localStorage.removeItem(STORAGE_KEY);
       } finally {
         setHydrated(true);
       }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [setEdges, setNodes]);
+  }, [flash, setEdges, setNodes]);
 
   useEffect(() => {
     if (!hydrated) return;
     const timer = window.setTimeout(() => {
-      const saved: SavedPlan = { version: 1, project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements, repoScope };
+      const saved: SavedPlan = { version: 1, project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements, repoScope, showEdgeLabels, hiddenKinds, spotlightSelection, layoutDirection };
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
       setSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [customAnalysis, edges, focus, hydrated, nodes, outputFormat, outputRequirements, project, repoScope, targetChat]);
+  }, [customAnalysis, edges, focus, hiddenKinds, hydrated, layoutDirection, nodes, outputFormat, outputRequirements, project, repoScope, showEdgeLabels, spotlightSelection, targetChat]);
 
   const addNode = (kind: NodeKind) => {
     const id = uid(kind);
@@ -407,21 +483,18 @@ export default function Home() {
   };
 
   const autoLayout = () => {
-    setNodes((current) => layoutGraph(current, edges));
+    setNodes((current) => layoutGraph(current, edges, layoutDirection));
+    window.setTimeout(() => void flowRef.current?.fitView({ padding: .18, duration: 400 }), 30);
+  };
+
+  const changeLayoutDirection = (direction: LayoutDirection) => {
+    setLayoutDirection(direction);
+    setNodes((current) => layoutGraph(current, edges, direction));
     window.setTimeout(() => void flowRef.current?.fitView({ padding: .18, duration: 400 }), 30);
   };
 
   const copyText = async (value: string, mode: "build" | "analysis", message: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      const textarea = document.createElement("textarea");
-      textarea.value = value;
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      textarea.remove();
-    }
+    await writeClipboard(value);
     setCopied(mode);
     flash(message);
     window.setTimeout(() => setCopied(undefined), 1600);
@@ -440,17 +513,49 @@ export default function Home() {
   };
 
   const exportPlan = () => {
-    const saved: SavedPlan = { version: 1, project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements, repoScope };
+    const saved: SavedPlan = { version: 1, project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements, repoScope, showEdgeLabels, hiddenKinds, spotlightSelection, layoutDirection };
     download(JSON.stringify(saved, null, 2), `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "flowspec"}.json`, "application/json");
+  };
+
+  const sharePlan = async () => {
+    const saved: SavedPlan = { version: 1, project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements, repoScope, showEdgeLabels, hiddenKinds, spotlightSelection, layoutDirection };
+    const shareUrl = `${SHARE_BASE_URL}#plan=${encodeSharePayload(saved)}`;
+    if (shareUrl.length > MAX_SHARE_URL_LENGTH) {
+      flash("This plan is too large for a reliable link — use Export and share the JSON file instead");
+      return;
+    }
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: `FlowSpec — ${project.title}`, text: "Open this editable FlowSpec plan.", url: shareUrl });
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
+    }
+    await writeClipboard(shareUrl);
+    flash("Share link copied — anyone with the link can open an editable copy");
   };
 
   const exportMermaid = () => {
     const mermaid = buildMermaidFlow(
       nodes.map((node) => ({ id: node.id, label: node.data.label, kind: node.data.kind })),
       edges.map((item) => ({ source: item.source, target: item.target, relationship: item.data?.relationship ?? String(item.label ?? "connects"), payload: item.data?.payload })),
+      layoutDirection,
     );
     download(mermaid, `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "flowspec"}.mmd`, "text/plain");
     flash("Mermaid map downloaded");
+  };
+
+  const exportTechnicalDoc = () => {
+    const document = buildTechnicalDocument(
+      project,
+      nodes.map((node) => ({ id: node.id, label: node.data.label, kind: node.data.kind, responsibility: node.data.responsibility, fileHint: node.data.fileHint, inputs: node.data.inputs, outputs: node.data.outputs, state: node.data.state, notes: node.data.notes })),
+      edges.map((item, index) => ({ id: item.id || `edge-${index + 1}`, source: item.source, target: item.target, relationship: item.data?.relationship ?? String(item.label ?? "connects"), payload: item.data?.payload ?? "", notes: item.data?.notes ?? "" })),
+      layoutDirection,
+    );
+    download(document, `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "flowspec"}-technical-overview.md`, "text/markdown");
+    setExportMenuOpen(false);
+    flash("Technical document downloaded");
   };
 
   const importPlan = async (file?: File) => {
@@ -467,6 +572,10 @@ export default function Home() {
       setCustomAnalysis(saved.customAnalysis ?? "");
       setOutputRequirements(saved.outputRequirements ?? "");
       setRepoScope(saved.repoScope ?? DEFAULT_REPO_SCOPE);
+      setShowEdgeLabels(saved.showEdgeLabels ?? true);
+      setHiddenKinds((saved.hiddenKinds ?? []).filter((kind): kind is NodeKind => kind in KIND_META));
+      setSpotlightSelection(saved.spotlightSelection ?? false);
+      setLayoutDirection(saved.layoutDirection === "TB" ? "TB" : "RL");
       setSelectedNodeId(undefined);
       setSelectedEdgeId(undefined);
       flash("Plan loaded");
@@ -482,7 +591,7 @@ export default function Home() {
       setAnalysisOutput(await file.text());
       setImportError("");
       setImportSummary("");
-      setTab("import");
+      openHandoff("map");
       flash("Analysis response loaded — review and import it");
     } catch {
       setImportError("FlowSpec could not read that response file.");
@@ -515,8 +624,10 @@ export default function Home() {
       }));
       const openQuestions = imported.unknowns.length ? `\n\nOpen questions from repository analysis:\n- ${imported.unknowns.join("\n- ")}` : "";
       setProject({ ...imported.project, existingContext: `${imported.project.existingContext}${openQuestions}`.trim() });
-      setNodes(layoutGraph(importedNodes, importedEdges));
+      setNodes(layoutGraph(importedNodes, importedEdges, layoutDirection));
       setEdges(importedEdges);
+      setHiddenKinds([]);
+      setSpotlightSelection(false);
       setSelectedNodeId(undefined);
       setSelectedEdgeId(undefined);
       const summary = `Imported ${importedNodes.length} nodes and ${importedEdges.length} connections`;
@@ -539,6 +650,10 @@ export default function Home() {
     setImportError("");
     setImportSummary("");
     setAnalysisOutput("");
+    setShowEdgeLabels(true);
+    setHiddenKinds([]);
+    setSpotlightSelection(false);
+    setLayoutDirection("RL");
     setTab("brief");
   };
 
@@ -549,9 +664,10 @@ export default function Home() {
         <div className="top-actions">
           <button className="button ghost" onClick={newPlan}><FileJson size={14} /> New</button>
           <button className="button ghost" onClick={() => fileRef.current?.click()}><FolderOpen size={14} /> Open</button>
-          <button className="button ghost" onClick={exportPlan}><Save size={14} /> Export</button>
-          <button className="button ghost" onClick={() => setTab("import")}><Network size={15} /> Map repo</button>
-          <button className="button primary" onClick={() => setTab("prompt")}><Sparkles size={15} /> Build prompt</button>
+          <div className="export-control"><button className="button ghost" aria-expanded={exportMenuOpen} onClick={() => setExportMenuOpen((current) => !current)}><Save size={14} /> Export</button>{exportMenuOpen ? <div className="export-menu" role="menu"><button onClick={() => { exportPlan(); setExportMenuOpen(false); }}><FileJson size={15} /><span><strong>Editable plan</strong><small>FlowSpec JSON</small></span></button><button onClick={exportTechnicalDoc}><FileText size={15} /><span><strong>Technical document</strong><small>Markdown with Mermaid</small></span></button><button onClick={() => { exportMermaid(); setExportMenuOpen(false); }}><Network size={15} /><span><strong>Mermaid diagram</strong><small>Standalone .mmd</small></span></button></div> : null}</div>
+          <button className="button ghost" onClick={() => void sharePlan()}><Share2 size={14} /> Share</button>
+          <button className="button ghost" onClick={() => openHandoff("map")}><Network size={15} /> Map repo</button>
+          <button className="button primary" onClick={() => openHandoff("build")}><Sparkles size={15} /> Build prompt</button>
           <input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={(event) => { void importPlan(event.target.files?.[0]); event.target.value = ""; }} />
           <input ref={analysisFileRef} type="file" accept="application/json,text/markdown,text/plain,.json,.md,.txt" hidden onChange={(event) => { void loadAnalysisResponse(event.target.files?.[0]); event.target.value = ""; }} />
         </div>
@@ -579,13 +695,41 @@ export default function Home() {
 
         <section className="canvas-panel">
           <div className="canvas-toolbar">
-            <div><button onClick={() => addNode("component")}><Plus size={14} /> Node</button><button onClick={autoLayout}><LayoutGrid size={14} /> Arrange</button><button onClick={() => flowRef.current?.fitView({ padding: .18, duration: 350 })}><Maximize2 size={14} /> Fit</button><button onClick={exportMermaid} disabled={!nodes.length}><Download size={14} /> Mermaid</button></div>
+            <div className="canvas-actions">
+              <button className="toolbar-button" onClick={() => addNode("component")}><Plus size={14} /> Node</button>
+              <button className="toolbar-button" onClick={autoLayout}><LayoutGrid size={14} /> Arrange</button>
+              <button className="toolbar-button" onClick={() => flowRef.current?.fitView({ padding: .18, duration: 350 })}><Maximize2 size={14} /> Fit</button>
+              <div className="view-control">
+                <button className={`toolbar-button${hiddenKinds.length || spotlightSelection || !showEdgeLabels ? " active" : ""}`} aria-expanded={viewMenuOpen} onClick={() => setViewMenuOpen((current) => !current)}><SlidersHorizontal size={14} /> View</button>
+                {viewMenuOpen ? <div className="view-menu" role="dialog" aria-label="Canvas view controls">
+                  <div className="view-menu-heading"><div><strong>Canvas view</strong><span>Arrange and simplify the current view.</span></div><button onClick={() => { setHiddenKinds([]); setSpotlightSelection(false); setShowEdgeLabels(true); changeLayoutDirection("RL"); }}>Reset</button></div>
+                  <div className="orientation-control">
+                    <span>Flow direction</span>
+                    <div>
+                      <button className={layoutDirection === "RL" ? "selected" : ""} aria-pressed={layoutDirection === "RL"} onClick={() => changeLayoutDirection("RL")}><ArrowLeft size={13} /><span><strong>Right to left</strong><small>Horizontal</small></span></button>
+                      <button className={layoutDirection === "TB" ? "selected" : ""} aria-pressed={layoutDirection === "TB"} onClick={() => changeLayoutDirection("TB")}><ArrowDown size={13} /><span><strong>Top to bottom</strong><small>Vertical</small></span></button>
+                    </div>
+                  </div>
+                  <div className="view-kind-grid">{(Object.keys(KIND_META) as NodeKind[]).map((kind) => {
+                    const meta = KIND_META[kind];
+                    const Icon = meta.icon;
+                    const visible = !hiddenKinds.includes(kind);
+                    return <button className={visible ? "visible" : ""} aria-pressed={visible} key={kind} onClick={() => setHiddenKinds((current) => current.includes(kind) ? current.filter((item) => item !== kind) : [...current, kind])}><span style={{ "--kind-color": meta.color } as React.CSSProperties}><Icon size={12} /></span><strong>{meta.label}</strong>{visible ? <Eye size={13} /> : <EyeOff size={13} />}</button>;
+                  })}</div>
+                  <div className="view-settings">
+                    <button className={spotlightSelection ? "enabled" : ""} aria-pressed={spotlightSelection} onClick={() => setSpotlightSelection((current) => !current)}><span><strong>Spotlight selection</strong><small>Dim nodes outside the selected node’s direct flow</small></span>{spotlightSelection ? <Check size={14} /> : null}</button>
+                    <button className={showEdgeLabels ? "enabled" : ""} aria-pressed={showEdgeLabels} onClick={() => setShowEdgeLabels((current) => !current)}><span><strong>Connection labels</strong><small>Show relationship labels on the canvas</small></span>{showEdgeLabels ? <Check size={14} /> : null}</button>
+                  </div>
+                </div> : null}
+              </div>
+              <button className="toolbar-button" onClick={exportMermaid} disabled={!nodes.length}><Download size={14} /> Mermaid</button>
+            </div>
             <span className="save-status"><i /> {savedAt ? `Saved ${savedAt}` : "Saved locally"}</span>
           </div>
-          <div className="flow-wrap">
+          <div className={`flow-wrap${showEdgeLabels ? "" : " labels-hidden"}`}>
             <ReactFlow<FlowNode, FlowEdge>
-              nodes={nodes}
-              edges={edges}
+              nodes={canvasNodes}
+              edges={canvasEdges}
               nodeTypes={NODE_TYPES}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
@@ -611,64 +755,126 @@ export default function Home() {
 
         <aside className="details-panel">
           <div className="tabs">
-            <button className={tab === "prompt" ? "active" : ""} onClick={() => setTab("prompt")}>Build</button>
-            <button className={tab === "import" ? "active" : ""} onClick={() => setTab("import")}>Repo map</button>
+            <button className={tab === "assistant" ? "active" : ""} onClick={() => setTab("assistant")}>VS Code chat</button>
             <button className={tab === "inspect" ? "active" : ""} onClick={() => setTab("inspect")}>Inspector</button>
-            <button className={tab === "brief" ? "active" : ""} onClick={() => setTab("brief")}>Brief</button>
           </div>
 
-          {tab === "prompt" ? (
-            <div className="panel-scroll prompt-builder">
-              <div className="section-title"><div><span className="eyebrow">VS Code handoff</span><h2>Build the implementation prompt</h2></div><span>{prompt.length.toLocaleString()} chars</span></div>
-              <div className="form-grid two">
-                <label>Target chat<select value={targetChat} onChange={(event) => setTargetChat(event.target.value as TargetChat)}><option value="copilot">GitHub Copilot</option><option value="codex">Codex</option><option value="generic">Generic assistant</option></select></label>
-                <label>Output format<select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as OutputFormat)}>{(Object.keys(OUTPUT_LABELS) as OutputFormat[]).map((format) => <option value={format} key={format}>{OUTPUT_LABELS[format]}</option>)}</select></label>
-              </div>
-              <div className="focus-block"><label>What should it analyse?</label><div className="focus-options">{FOCUS_OPTIONS.map(([id, label]) => <button key={id} className={focus.includes(id) ? "selected" : ""} onClick={() => setFocus((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])}>{focus.includes(id) ? <Check size={11} /> : <Plus size={11} />}{label}</button>)}</div></div>
-              <label className="field-label">Additional analysis instruction<textarea rows={2} value={customAnalysis} onChange={(event) => setCustomAnalysis(event.target.value)} placeholder="e.g. Compare context state with the existing Zustand store." /></label>
-              <label className="field-label">Output requirements<textarea rows={2} value={outputRequirements} onChange={(event) => setOutputRequirements(event.target.value)} placeholder="Add any required headings, length limits or schema rules." /></label>
-              <div className="prompt-preview-heading"><label>Generated prompt</label><button onClick={() => download(prompt, `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "flowspec"}-prompt.md`, "text/markdown")}><Download size={13} /> .md</button></div>
-              <textarea className="prompt-preview" readOnly value={prompt} aria-label="Generated prompt" />
-              <button className="copy-button" onClick={() => void copyPrompt()}>{copied === "build" ? <Check size={16} /> : <Copy size={16} />}{copied === "build" ? "Copied — paste into VS Code" : `Copy for ${targetChat === "copilot" ? "Copilot" : targetChat === "codex" ? "Codex" : "chat"}`}</button>
-            </div>
-          ) : null}
+          {tab === "assistant" ? (
+            <div className="panel-scroll handoff-panel">
+              <div className="section-title"><div><span className="eyebrow">VS Code handoff</span><h2>Choose the direction</h2></div></div>
+              <p className="panel-intro">Send a planned change to chat for implementation, or bring repository analysis back into FlowSpec.</p>
 
-          {tab === "import" ? (
-            <div className="panel-scroll repo-importer">
-              <div className="section-title"><div><span className="eyebrow">Existing repository</span><h2>Turn repo analysis into a map</h2></div></div>
-              <div className="roundtrip-steps" aria-label="Repository mapping workflow">
-                <div><span>1</span><strong>Prompt chat</strong><small>Analyse the open repo</small></div>
-                <ArrowRight size={15} />
-                <div><span>2</span><strong>Import output</strong><small>Create an editable map</small></div>
-              </div>
-              <div className="form-grid repo-controls">
-                <label>Target chat<select value={targetChat} onChange={(event) => setTargetChat(event.target.value as TargetChat)}><option value="copilot">GitHub Copilot</option><option value="codex">Codex</option><option value="generic">Generic assistant</option></select></label>
-                <label>Analysis scope<textarea rows={3} value={repoScope} onChange={(event) => setRepoScope(event.target.value)} placeholder="Which application area or user flow should the chat trace?" /></label>
-              </div>
-              <div className="prompt-preview-heading"><label>Repository analysis prompt</label><button onClick={() => download(analysisPrompt, "flowspec-repo-analysis-prompt.md", "text/markdown")}><Download size={13} /> .md</button></div>
-              <textarea className="prompt-preview repo-prompt" readOnly value={analysisPrompt} aria-label="Repository analysis prompt" />
-              <button className="copy-button" onClick={() => void copyAnalysisPrompt()}>{copied === "analysis" ? <Check size={16} /> : <Copy size={16} />}{copied === "analysis" ? "Copied — run it in VS Code" : `Copy analysis prompt for ${targetChat === "copilot" ? "Copilot" : targetChat === "codex" ? "Codex" : "chat"}`}</button>
+              <div className="handoff-accordion">
+                <section className={`handoff-section${handoffSection === "build" ? " open" : ""}`}>
+                  <button className="handoff-summary" aria-expanded={handoffSection === "build"} onClick={() => setHandoffSection("build")}><span className="handoff-icon"><Sparkles size={15} /></span><span><strong>Plan → Build</strong><small>Generate an implementation prompt from this canvas</small></span><ChevronDown size={16} /></button>
+                  {handoffSection === "build" ? <div className="handoff-content">
+                    <div className="form-grid two">
+                      <label>Target chat<select value={targetChat} onChange={(event) => setTargetChat(event.target.value as TargetChat)}><option value="copilot">GitHub Copilot</option><option value="codex">Codex</option><option value="generic">Generic assistant</option></select></label>
+                      <label>Output format<select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as OutputFormat)}>{(Object.keys(OUTPUT_LABELS) as OutputFormat[]).map((format) => <option value={format} key={format}>{OUTPUT_LABELS[format]}</option>)}</select></label>
+                    </div>
+                    <div className="focus-block"><label>What should it analyse?</label><div className="focus-options">{FOCUS_OPTIONS.map(([id, label]) => <button key={id} className={focus.includes(id) ? "selected" : ""} onClick={() => setFocus((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])}>{focus.includes(id) ? <Check size={11} /> : <Plus size={11} />}{label}</button>)}</div></div>
+                    <label className="field-label">Additional analysis instruction<textarea rows={2} value={customAnalysis} onChange={(event) => setCustomAnalysis(event.target.value)} placeholder="e.g. Compare context state with the existing Zustand store." /></label>
+                    <label className="field-label">Output requirements<textarea rows={2} value={outputRequirements} onChange={(event) => setOutputRequirements(event.target.value)} placeholder="Add any required headings, length limits or schema rules." /></label>
+                    <div className="prompt-preview-heading"><label>Generated prompt · {prompt.length.toLocaleString()} chars</label><button onClick={() => download(prompt, `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "flowspec"}-prompt.md`, "text/markdown")}><Download size={13} /> .md</button></div>
+                    <textarea className="prompt-preview" readOnly value={prompt} aria-label="Generated implementation prompt" />
+                    <button className="copy-button" onClick={() => void copyPrompt()}>{copied === "build" ? <Check size={16} /> : <Copy size={16} />}{copied === "build" ? "Copied — paste into VS Code" : `Copy for ${targetChat === "copilot" ? "Copilot" : targetChat === "codex" ? "Codex" : "chat"}`}</button>
+                  </div> : null}
+                </section>
 
-              <div className="import-divider"><span>Then bring the response back</span></div>
-              <div className="response-heading"><div><strong>Copilot analysis output</strong><span>Paste the whole response or its fenced FlowSpec JSON block.</span></div><button className="text-button" onClick={() => analysisFileRef.current?.click()}><FolderOpen size={13} /> Load file</button></div>
-              <textarea className={`analysis-output${importError ? " invalid" : ""}`} value={analysisOutput} onChange={(event) => { setAnalysisOutput(event.target.value); setImportError(""); setImportSummary(""); }} rows={10} spellCheck={false} aria-label="Copilot analysis output" aria-invalid={Boolean(importError)} placeholder={'Paste Copilot\'s complete response here. FlowSpec will find the ```flowspec JSON block automatically.'} />
-              {importError ? <div className="import-message error" role="alert"><strong>Couldn’t import this response</strong><span>{importError}</span></div> : null}
-              {importSummary ? <div className="import-message success" role="status"><Check size={15} /><span>{importSummary}</span></div> : null}
-              <button className="import-button" disabled={!analysisOutput.trim()} onClick={importRepoMap}><Upload size={16} /> Import and replace canvas</button>
-              <p className="import-note">Importing replaces the current canvas. Export the current plan first if you need a separate copy.</p>
+                <section className={`handoff-section${handoffSection === "map" ? " open" : ""}`}>
+                  <button className="handoff-summary" aria-expanded={handoffSection === "map"} onClick={() => setHandoffSection("map")}><span className="handoff-icon"><Network size={15} /></span><span><strong>Repo → Map</strong><small>Analyse an open repo and import its current flow</small></span><ChevronDown size={16} /></button>
+                  {handoffSection === "map" ? <div className="handoff-content">
+                    <div className="roundtrip-steps" aria-label="Repository mapping workflow"><div><span>1</span><strong>Prompt chat</strong><small>Analyse the open repo</small></div><ArrowRight size={15} /><div><span>2</span><strong>Import output</strong><small>Create an editable map</small></div></div>
+                    <div className="form-grid repo-controls">
+                      <label>Target chat<select value={targetChat} onChange={(event) => setTargetChat(event.target.value as TargetChat)}><option value="copilot">GitHub Copilot</option><option value="codex">Codex</option><option value="generic">Generic assistant</option></select></label>
+                      <label>Analysis scope<textarea rows={3} value={repoScope} onChange={(event) => setRepoScope(event.target.value)} placeholder="Which application area or user flow should the chat trace?" /></label>
+                    </div>
+                    <div className="prompt-preview-heading"><label>Repository analysis prompt</label><button onClick={() => download(analysisPrompt, "flowspec-repo-analysis-prompt.md", "text/markdown")}><Download size={13} /> .md</button></div>
+                    <textarea className="prompt-preview repo-prompt" readOnly value={analysisPrompt} aria-label="Repository analysis prompt" />
+                    <button className="copy-button" onClick={() => void copyAnalysisPrompt()}>{copied === "analysis" ? <Check size={16} /> : <Copy size={16} />}{copied === "analysis" ? "Copied — run it in VS Code" : `Copy analysis prompt for ${targetChat === "copilot" ? "Copilot" : targetChat === "codex" ? "Codex" : "chat"}`}</button>
+                    <div className="import-divider"><span>Then bring the response back</span></div>
+                    <div className="response-heading"><div><strong>Copilot analysis output</strong><span>Paste the whole response or its fenced FlowSpec JSON block.</span></div><button className="text-button" onClick={() => analysisFileRef.current?.click()}><FolderOpen size={13} /> Load file</button></div>
+                    <textarea className={`analysis-output${importError ? " invalid" : ""}`} value={analysisOutput} onChange={(event) => { setAnalysisOutput(event.target.value); setImportError(""); setImportSummary(""); }} rows={10} spellCheck={false} aria-label="Copilot analysis output" aria-invalid={Boolean(importError)} placeholder={'Paste Copilot\'s complete response here. FlowSpec will find the ```flowspec JSON block automatically.'} />
+                    {importError ? <div className="import-message error" role="alert"><strong>Couldn’t import this response</strong><span>{importError}</span></div> : null}
+                    {importSummary ? <div className="import-message success" role="status"><Check size={15} /><span>{importSummary}</span></div> : null}
+                    <button className="import-button" disabled={!analysisOutput.trim()} onClick={importRepoMap}><Upload size={16} /> Import and replace canvas</button>
+                    <p className="import-note">Importing replaces the current canvas. Export the current plan first if you need a separate copy.</p>
+                  </div> : null}
+                </section>
+              </div>
             </div>
           ) : null}
 
           {tab === "inspect" ? (
             <div className="panel-scroll inspector">
-              {!selectedNode && !selectedEdge ? <div className="empty-inspector"><Boxes size={24} /><strong>Select a node or connection</strong><span>Edit its responsibility, contracts, state or payload here.</span></div> : null}
-              {selectedNode ? <><div className="section-title"><div><span className="eyebrow">Node contract</span><h2>{selectedNode.data.label}</h2></div><button className="danger-icon" onClick={deleteSelection}><Trash2 size={15} /></button></div><div className="form-grid"><label>Type<select value={selectedNode.data.kind} onChange={(event) => updateNode({ kind: event.target.value as NodeKind })}>{(Object.keys(KIND_META) as NodeKind[]).map((kind) => <option value={kind} key={kind}>{KIND_META[kind].label}</option>)}</select></label><label>Name<input value={selectedNode.data.label} onChange={(event) => updateNode({ label: event.target.value })} /></label><label>Responsibility<textarea rows={3} value={selectedNode.data.responsibility} onChange={(event) => updateNode({ responsibility: event.target.value })} /></label><label>Existing or likely file area<input value={selectedNode.data.fileHint} placeholder="src/features/products/…" onChange={(event) => updateNode({ fileHint: event.target.value })} /></label></div><ListEditor title="Inputs" items={selectedNode.data.inputs} placeholder="prop, parameter or event" onChange={(inputs) => updateNode({ inputs })} /><ListEditor title="Outputs" items={selectedNode.data.outputs} placeholder="render, callback or result" onChange={(outputs) => updateNode({ outputs })} /><ListEditor title="State" items={selectedNode.data.state} placeholder="owned or consumed state" onChange={(state) => updateNode({ state })} /><label className="field-label">Notes<textarea rows={3} value={selectedNode.data.notes} onChange={(event) => updateNode({ notes: event.target.value })} /></label></> : null}
-              {selectedEdge ? <><div className="section-title"><div><span className="eyebrow">Connection</span><h2>{nodes.find((node) => node.id === selectedEdge.source)?.data.label} → {nodes.find((node) => node.id === selectedEdge.target)?.data.label}</h2></div><button className="danger-icon" onClick={deleteSelection}><Trash2 size={15} /></button></div><div className="form-grid"><label>Relationship<input list="relationship-options" value={selectedEdge.data?.relationship ?? "connects"} onChange={(event) => updateEdge({ relationship: event.target.value })} /><datalist id="relationship-options">{RELATIONSHIPS.map((relationship) => <option value={relationship} key={relationship} />)}</datalist></label><label>Data or contract<input value={selectedEdge.data?.payload ?? ""} placeholder="filters: ProductFilters" onChange={(event) => updateEdge({ payload: event.target.value })} /></label><label>Notes<textarea rows={4} value={selectedEdge.data?.notes ?? ""} onChange={(event) => updateEdge({ notes: event.target.value })} /></label></div></> : null}
+              {!selectedNode && !selectedEdge ? <div className="empty-inspector"><Boxes size={25} /><strong>Select something on the canvas</strong><span>Choose a node to review its props, state and connected flow, or choose a connection to edit what it carries.</span></div> : null}
+
+              {selectedNode ? (
+                <>
+                  <div className="inspector-header">
+                    <div>
+                      <span className="inspector-kind" style={{ "--node-color": selectedNodeMeta?.color } as React.CSSProperties}>{SelectedNodeIcon ? <SelectedNodeIcon size={13} /> : null}{selectedNodeMeta?.label}</span>
+                      <h2>{selectedNode.data.label}</h2>
+                    </div>
+                    <button className="danger-icon" aria-label={`Delete ${selectedNode.data.label}`} onClick={deleteSelection}><Trash2 size={15} /></button>
+                  </div>
+
+                  <InspectorSection title="Identity" description="Name this part of the architecture and define its role.">
+                    <div className="form-grid two inspector-identity">
+                      <label>Type<select value={selectedNode.data.kind} onChange={(event) => updateNode({ kind: event.target.value as NodeKind })}>{(Object.keys(KIND_META) as NodeKind[]).map((kind) => <option value={kind} key={kind}>{KIND_META[kind].label}</option>)}</select></label>
+                      <label>Name<input value={selectedNode.data.label} onChange={(event) => updateNode({ label: event.target.value })} /></label>
+                    </div>
+                    <div className="form-grid inspector-purpose">
+                      <label>Responsibility<textarea rows={2} value={selectedNode.data.responsibility} onChange={(event) => updateNode({ responsibility: event.target.value })} /></label>
+                      <label>File or likely location<input value={selectedNode.data.fileHint} placeholder="src/features/products/…" onChange={(event) => updateNode({ fileHint: event.target.value })} /></label>
+                    </div>
+                  </InspectorSection>
+
+                  <InspectorSection title="Component contract" description="One item per line. These details become part of the generated build prompt.">
+                    <div className="contract-grid">
+                      <ContractEditor title="Inputs / props received" hint="Props, params and events coming in" items={selectedNode.data.inputs} placeholder="filters: ProductFilters" onChange={(inputs) => updateNode({ inputs })} />
+                      <ContractEditor title="Outputs / callbacks emitted" hint="Callbacks, renders and return values" items={selectedNode.data.outputs} placeholder="onFilterChange(filters)" onChange={(outputs) => updateNode({ outputs })} />
+                      <ContractEditor title="State used or owned" hint="Local, shared or server state" items={selectedNode.data.state} placeholder="selectedFilters" onChange={(state) => updateNode({ state })} />
+                    </div>
+                  </InspectorSection>
+
+                  <InspectorSection title="Connected flow" description="Select a row to inspect exactly what crosses that connection.">
+                    {selectedNodeConnections.length ? <div className="connection-list">{selectedNodeConnections.map((item) => {
+                      const incoming = item.target === selectedNode.id;
+                      const peerId = incoming ? item.source : item.target;
+                      const peer = nodes.find((node) => node.id === peerId);
+                      return <button className="connection-row" key={item.id} onClick={() => { setSelectedEdgeId(item.id); setSelectedNodeId(undefined); }}><span>{incoming ? "From" : "To"}</span><div><strong>{peer?.data.label ?? peerId}</strong><small>{item.data?.relationship ?? String(item.label ?? "connects")}{item.data?.payload ? ` · ${item.data.payload}` : ""}</small></div><ArrowRight size={14} /></button>;
+                    })}</div> : <p className="empty-section">No connections yet. Drag between node handles on the canvas to add one.</p>}
+                  </InspectorSection>
+
+                  <InspectorSection title="Evidence and notes" description="Record repository evidence, assumptions or implementation context.">
+                    <label className="field-label compact-field">Notes<textarea rows={3} value={selectedNode.data.notes} onChange={(event) => updateNode({ notes: event.target.value })} placeholder="Observed: src/features/products/ProductPage.tsx:20" /></label>
+                  </InspectorSection>
+                </>
+              ) : null}
+
+              {selectedEdge ? (
+                <>
+                  <div className="inspector-header">
+                    <div><span className="eyebrow">Connection</span><h2>{nodes.find((node) => node.id === selectedEdge.source)?.data.label} → {nodes.find((node) => node.id === selectedEdge.target)?.data.label}</h2></div>
+                    <button className="danger-icon" aria-label="Delete connection" onClick={deleteSelection}><Trash2 size={15} /></button>
+                  </div>
+                  <InspectorSection title="Data flow" description="Describe the direction and contract crossing this boundary.">
+                    <div className="form-grid">
+                      <label>Relationship<input list="relationship-options" value={selectedEdge.data?.relationship ?? "connects"} onChange={(event) => updateEdge({ relationship: event.target.value })} /><datalist id="relationship-options">{RELATIONSHIPS.map((relationship) => <option value={relationship} key={relationship} />)}</datalist></label>
+                      <label>Props, event or payload<input value={selectedEdge.data?.payload ?? ""} placeholder="filters: ProductFilters" onChange={(event) => updateEdge({ payload: event.target.value })} /></label>
+                    </div>
+                  </InspectorSection>
+                  <InspectorSection title="Evidence and notes" description="Explain where this connection is observed or why it is proposed.">
+                    <label className="field-label compact-field">Notes<textarea rows={4} value={selectedEdge.data?.notes ?? ""} onChange={(event) => updateEdge({ notes: event.target.value })} placeholder="Observed: src/routes/products.tsx:16" /></label>
+                  </InspectorSection>
+                </>
+              ) : null}
             </div>
           ) : null}
 
           {tab === "brief" ? (
-            <div className="panel-scroll brief-editor"><div className="section-title"><div><span className="eyebrow">Project context</span><h2>Give the prompt a clear brief</h2></div></div><div className="form-grid"><label>Plan title<input value={project.title} onChange={(event) => setProject({ ...project, title: event.target.value })} /></label><label>Objective<textarea rows={3} value={project.objective} onChange={(event) => setProject({ ...project, objective: event.target.value })} placeholder="What should change and why?" /></label><label>Current understanding<textarea rows={4} value={project.existingContext} onChange={(event) => setProject({ ...project, existingContext: event.target.value })} placeholder="What do you already know about the existing flow?" /></label><label>Stack and conventions<input value={project.stack} onChange={(event) => setProject({ ...project, stack: event.target.value })} /></label><label>Constraints<textarea rows={4} value={project.constraints} onChange={(event) => setProject({ ...project, constraints: event.target.value })} placeholder="Compatibility, deadlines, architecture rules…" /></label></div></div>
+            <div className="panel-scroll brief-editor"><div className="section-title"><div><span className="eyebrow">Briefing</span><h2>Set the project context</h2></div><button className="section-action" onClick={() => openHandoff("build")}><Check size={13} /> Done</button></div><p className="panel-intro">This context guides the generated implementation prompt. Edit it here, then select Done when it is ready.</p><div className="form-grid"><label>Plan title<input value={project.title} onChange={(event) => setProject({ ...project, title: event.target.value })} /></label><label>Objective<textarea rows={3} value={project.objective} onChange={(event) => setProject({ ...project, objective: event.target.value })} placeholder="What should change and why?" /></label><label>Current understanding<textarea rows={4} value={project.existingContext} onChange={(event) => setProject({ ...project, existingContext: event.target.value })} placeholder="What do you already know about the existing flow?" /></label><label>Stack and conventions<input value={project.stack} onChange={(event) => setProject({ ...project, stack: event.target.value })} /></label><label>Constraints<textarea rows={4} value={project.constraints} onChange={(event) => setProject({ ...project, constraints: event.target.value })} placeholder="Compatibility, deadlines, architecture rules…" /></label></div></div>
           ) : null}
         </aside>
       </div>
