@@ -16,6 +16,7 @@ import {
   ServerCog,
   TestTube2,
   Webhook,
+  X,
   Cloud,
   Globe2,
   type LucideIcon,
@@ -30,10 +31,12 @@ interface TechnicalReviewProps {
   nodes: ReviewNode[];
   edges: ReviewEdge[];
   onEditPlan: () => void;
-  onInspectNode: (nodeId: string) => void;
-  onInspectEdge: (edgeId: string) => void;
+  onEditNodeInPlan: (nodeId: string) => void;
+  onEditEdgeInPlan: (edgeId: string) => void;
   onExport: () => void;
 }
+
+type ReviewSelection = { type: "node"; id: string } | { type: "edge"; id: string };
 
 const KIND_META: Record<RepoNodeKind, { label: string; icon: LucideIcon }> = {
   route: { label: "Route", icon: Route },
@@ -57,19 +60,23 @@ function values(items: string[]): string {
   return populated.length ? populated.join(", ") : "Not recorded";
 }
 
-export function TechnicalReview({ project, nodes, edges, onEditPlan, onInspectNode, onInspectEdge, onExport }: TechnicalReviewProps) {
+export function TechnicalReview({ project, nodes, edges, onEditPlan, onEditNodeInPlan, onEditEdgeInPlan, onExport }: TechnicalReviewProps) {
   const [section, setSection] = useState<ReviewSection>("overview");
+  const [selection, setSelection] = useState<ReviewSelection>();
   const review = useMemo(() => buildTechnicalReview(project, nodes, edges), [edges, nodes, project]);
   const names = useMemo(() => new Map(nodes.map((node) => [node.id, node.label])), [nodes]);
   const groupedGaps = useMemo(() => Array.from(new Set(review.gaps.map((item) => item.area))).map((area) => ({ area, gaps: review.gaps.filter((item) => item.area === area) })), [review.gaps]);
+  const selectedNode = selection?.type === "node" ? nodes.find((node) => node.id === selection.id) : undefined;
+  const selectedEdge = selection?.type === "edge" ? edges.find((edge) => edge.id === selection.id) : undefined;
+  const selectedNodeConnections = selectedNode ? edges.filter((edge) => edge.source === selectedNode.id || edge.target === selectedNode.id) : [];
 
   const inspectGap = (nodeId?: string, edgeId?: string) => {
-    if (nodeId) onInspectNode(nodeId);
-    else if (edgeId) onInspectEdge(edgeId);
+    if (nodeId) setSelection({ type: "node", id: nodeId });
+    else if (edgeId) setSelection({ type: "edge", id: edgeId });
   };
 
   return (
-    <div className="technical-review-layout">
+    <div className={`technical-review-layout${selection ? " details-open" : ""}`}>
       <aside className="review-navigation" aria-label="Technical review sections">
         <span className="review-navigation-label">Review sections</span>
         {SECTION_META.map((item) => {
@@ -102,7 +109,7 @@ export function TechnicalReview({ project, nodes, edges, onEditPlan, onInspectNo
                   <div>{layer.nodes.map((node) => {
                     const meta = KIND_META[node.kind];
                     const Icon = meta.icon;
-                    return <button key={node.id} className={`review-node kind-${node.kind}`} onClick={() => onInspectNode(node.id)}><span><Icon size={13} /> {meta.label}</span><strong>{node.label}</strong><small>{node.responsibility || "Responsibility not recorded"}</small></button>;
+                    return <button key={node.id} className={`review-node kind-${node.kind}${selectedNode?.id === node.id ? " selected" : ""}`} aria-pressed={selectedNode?.id === node.id} onClick={() => setSelection({ type: "node", id: node.id })}><span><Icon size={13} /> {meta.label}</span><strong>{node.label}</strong><small>{node.responsibility || "Responsibility not recorded"}</small></button>;
                   })}</div>
                   {index < review.layers.length - 1 ? <ArrowRight className="review-layer-arrow" size={16} aria-hidden="true" /> : null}
                 </div>
@@ -128,13 +135,13 @@ export function TechnicalReview({ project, nodes, edges, onEditPlan, onInspectNo
               <div className="review-table-wrap"><table className="review-table"><thead><tr><th>Component or boundary</th><th>Responsibility</th><th>Inputs / props</th><th>Outputs / callbacks</th><th>State</th><th>Evidence</th></tr></thead><tbody>{nodes.map((node) => {
                 const meta = KIND_META[node.kind];
                 const Icon = meta.icon;
-                return <tr key={node.id} onClick={() => onInspectNode(node.id)}><td><button><span className={`review-kind kind-${node.kind}`}><Icon size={12} /> {meta.label}</span><strong>{node.label}</strong></button></td><td>{node.responsibility || "Not recorded"}</td><td>{values(node.inputs)}</td><td>{values(node.outputs)}</td><td>{values(node.state)}</td><td>{node.fileHint || node.notes || "Not recorded"}</td></tr>;
+                return <tr key={node.id} className={selectedNode?.id === node.id ? "selected" : ""}><td><button onClick={() => setSelection({ type: "node", id: node.id })}><span className={`review-kind kind-${node.kind}`}><Icon size={12} /> {meta.label}</span><strong>{node.label}</strong></button></td><td>{node.responsibility || "Not recorded"}</td><td>{values(node.inputs)}</td><td>{values(node.outputs)}</td><td>{values(node.state)}</td><td>{node.fileHint || node.notes || "Not recorded"}</td></tr>;
               })}</tbody></table></div>
             </section>
 
             <section className="review-block">
               <div className="review-block-heading"><div><h2>Connection inventory</h2><p>The mechanism and payload crossing every architectural boundary.</p></div><span>{edges.length} connections</span></div>
-              {edges.length ? <div className="review-connections">{edges.map((item) => <button key={item.id} onClick={() => onInspectEdge(item.id)}><div><span>Source</span><strong>{names.get(item.source) ?? item.source}</strong></div><div className="review-connection-contract"><span>{item.relationship || "connects"}</span><strong>{item.payload || "Payload not recorded"}</strong></div><ArrowRight size={15} /><div><span>Target</span><strong>{names.get(item.target) ?? item.target}</strong></div></button>)}</div> : <div className="review-empty"><Network size={22} /><strong>No connections mapped</strong><span>Connect nodes on the Plan canvas to describe the data flow.</span></div>}
+              {edges.length ? <div className="review-connections">{edges.map((item) => <button key={item.id} className={selectedEdge?.id === item.id ? "selected" : ""} aria-pressed={selectedEdge?.id === item.id} onClick={() => setSelection({ type: "edge", id: item.id })}><div><span>Source</span><strong>{names.get(item.source) ?? item.source}</strong></div><div className="review-connection-contract"><span>{item.relationship || "connects"}</span><strong>{item.payload || "Payload not recorded"}</strong></div><ArrowRight size={15} /><div><span>Target</span><strong>{names.get(item.target) ?? item.target}</strong></div></button>)}</div> : <div className="review-empty"><Network size={22} /><strong>No connections mapped</strong><span>Connect nodes on the Plan canvas to describe the data flow.</span></div>}
             </section>
           </div>
         ) : null}
@@ -146,6 +153,36 @@ export function TechnicalReview({ project, nodes, edges, onEditPlan, onInspectNo
           </div>
         ) : null}
       </main>
+
+      {selectedNode ? (() => {
+        const meta = KIND_META[selectedNode.kind];
+        const Icon = meta.icon;
+        return <aside className="review-details" aria-label={`${selectedNode.label} details`}>
+          <header><div><span className={`review-kind kind-${selectedNode.kind}`}><Icon size={12} /> {meta.label}</span><h2>{selectedNode.label}</h2></div><button aria-label="Close component details" onClick={() => setSelection(undefined)}><X size={17} /></button></header>
+          <div className="review-details-scroll">
+            <section><span>Responsibility</span><p>{selectedNode.responsibility || "Not recorded"}</p></section>
+            <section><span>Inputs / props</span><div className="review-detail-values">{selectedNode.inputs.some((item) => item.trim()) ? selectedNode.inputs.filter((item) => item.trim()).map((item, index) => <code key={`${item}-${index}`}>{item}</code>) : <em>Not recorded</em>}</div></section>
+            <section><span>Outputs / callbacks</span><div className="review-detail-values">{selectedNode.outputs.some((item) => item.trim()) ? selectedNode.outputs.filter((item) => item.trim()).map((item, index) => <code key={`${item}-${index}`}>{item}</code>) : <em>Not recorded</em>}</div></section>
+            <section><span>State</span><div className="review-detail-values">{selectedNode.state.some((item) => item.trim()) ? selectedNode.state.filter((item) => item.trim()).map((item, index) => <code key={`${item}-${index}`}>{item}</code>) : <em>Not recorded</em>}</div></section>
+            <section><span>Connected flow</span>{selectedNodeConnections.length ? <div className="review-detail-connections">{selectedNodeConnections.map((item) => {
+              const incoming = item.target === selectedNode.id;
+              const otherId = incoming ? item.source : item.target;
+              return <button key={item.id} onClick={() => setSelection({ type: "edge", id: item.id })}><small>{incoming ? "From" : "To"} {names.get(otherId) ?? otherId}</small><strong>{item.relationship || "connects"}</strong><em>{item.payload || "Payload not recorded"}</em></button>;
+            })}</div> : <em>Not connected</em>}</section>
+            <section><span>Evidence</span><p>{selectedNode.fileHint || selectedNode.notes || "Not recorded"}</p></section>
+          </div>
+          <footer><button className="button" onClick={() => onEditNodeInPlan(selectedNode.id)}><Pencil size={14} /> Edit in diagram</button></footer>
+        </aside>;
+      })() : selectedEdge ? <aside className="review-details" aria-label="Connection details">
+        <header><div><span className="review-kind"><Network size={12} /> Connection</span><h2>{selectedEdge.relationship || "Connection"}</h2></div><button aria-label="Close connection details" onClick={() => setSelection(undefined)}><X size={17} /></button></header>
+        <div className="review-details-scroll">
+          <section className="review-detail-flow"><div><span>Source</span><strong>{names.get(selectedEdge.source) ?? selectedEdge.source}</strong></div><ArrowRight size={16} /><div><span>Target</span><strong>{names.get(selectedEdge.target) ?? selectedEdge.target}</strong></div></section>
+          <section><span>Relationship</span><p>{selectedEdge.relationship || "Not recorded"}</p></section>
+          <section><span>Payload</span><div className="review-detail-values"><code>{selectedEdge.payload || "Not recorded"}</code></div></section>
+          <section><span>Evidence / notes</span><p>{selectedEdge.notes || "Not recorded"}</p></section>
+        </div>
+        <footer><button className="button" onClick={() => onEditEdgeInPlan(selectedEdge.id)}><Pencil size={14} /> Edit in diagram</button></footer>
+      </aside> : null}
     </div>
   );
 }
