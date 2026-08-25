@@ -54,6 +54,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import "@xyflow/react/dist/style.css";
+import { getNewNodePosition } from "./flowspec-canvas";
 import { buildMermaidFlow, buildRepoAnalysisPrompt, buildTechnicalDocument, parseRepoAnalysis, type FlowDirection, type RepoNodeKind } from "./flowspec-import";
 import { decodeSharePayload, encodeSharePayload } from "./flowspec-share";
 
@@ -352,6 +353,7 @@ export default function Home() {
   const [savedAt, setSavedAt] = useState<string>();
   const [hydrated, setHydrated] = useState(false);
   const flowRef = useRef<ReactFlowInstance<FlowNode, FlowEdge> | null>(null);
+  const flowWrapRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const analysisFileRef = useRef<HTMLInputElement | null>(null);
 
@@ -371,6 +373,7 @@ export default function Home() {
     }
     return nodes.map((node) => ({
       ...node,
+      selected: node.id === selectedNodeId,
       hidden: hiddenKinds.includes(node.data.kind),
       style: { ...node.style, opacity: spotlightIds.size && !spotlightIds.has(node.id) ? .2 : 1, transition: "opacity 160ms ease" },
     }));
@@ -442,10 +445,23 @@ export default function Home() {
   const addNode = (kind: NodeKind) => {
     const id = uid(kind);
     const index = nodes.length;
-    setNodes((current) => [...current, { id, type: "planner", position: { x: 100 + (index % 3) * 48, y: 90 + (index % 4) * 52 }, data: makeNodeData(kind) }]);
+    const instance = flowRef.current;
+    const canvasBounds = flowWrapRef.current?.getBoundingClientRect();
+    const viewportCenter = instance && canvasBounds
+      ? instance.screenToFlowPosition({ x: canvasBounds.left + canvasBounds.width / 2, y: canvasBounds.top + canvasBounds.height / 2 })
+      : undefined;
+    const position = getNewNodePosition({ viewportCenter, nodeCount: index, nodeWidth: NODE_W, nodeHeight: NODE_H });
+
+    setNodes((current) => [...current, { id, type: "planner", position, data: makeNodeData(kind) }]);
+    setHiddenKinds((current) => current.filter((item) => item !== kind));
     setSelectedNodeId(id);
     setSelectedEdgeId(undefined);
     setTab("inspect");
+    flash(`${KIND_META[kind].label} added to the centre of the canvas`);
+    if (instance) {
+      const zoom = Math.min(Math.max(instance.getViewport().zoom, .7), 1.2);
+      window.setTimeout(() => void instance.setCenter(position.x + NODE_W / 2, position.y + NODE_H / 2, { zoom, duration: 350 }), 30);
+    }
   };
 
   const onConnect = useCallback((connection: Connection) => {
@@ -682,12 +698,12 @@ export default function Home() {
       <div className="planner-layout">
         <aside className="palette-panel">
           <div className="palette-heading"><Boxes size={15} /><span>Building blocks</span></div>
-          <p>Click to add, then connect nodes on the canvas.</p>
+          <p>Click to add at the centre of the canvas, then edit it in the Inspector.</p>
           <div className="palette-list">
             {(Object.keys(KIND_META) as NodeKind[]).map((kind) => {
               const meta = KIND_META[kind];
               const Icon = meta.icon;
-              return <button key={kind} style={{ "--kind-color": meta.color } as React.CSSProperties} onClick={() => addNode(kind)}><span><Icon size={14} /></span><strong>{meta.label}</strong><Plus size={13} /></button>;
+              return <button key={kind} aria-label={`Add ${meta.label} to canvas`} style={{ "--kind-color": meta.color } as React.CSSProperties} onClick={() => addNode(kind)}><span><Icon size={14} /></span><strong>{meta.label}</strong><Plus size={13} /></button>;
             })}
           </div>
           <div className="palette-tip"><strong>Round-trip with chat</strong><span>Plan a change for your coding assistant, or import its repository analysis as a map.</span></div>
@@ -726,7 +742,7 @@ export default function Home() {
             </div>
             <span className="save-status"><i /> {savedAt ? `Saved ${savedAt}` : "Saved locally"}</span>
           </div>
-          <div className={`flow-wrap${showEdgeLabels ? "" : " labels-hidden"}`}>
+          <div ref={flowWrapRef} className={`flow-wrap${showEdgeLabels ? "" : " labels-hidden"}`}>
             <ReactFlow<FlowNode, FlowEdge>
               nodes={canvasNodes}
               edges={canvasEdges}
