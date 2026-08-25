@@ -10,7 +10,8 @@
     "build": "vinext build",
     "build:pages": "vite build --config vite.pages.config.ts",
     "start": "vinext start",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern pages-dist"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern pages-dist",
+    "test": "node --experimental-strip-types --test app/flowspec-import.test.ts"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.1.1",
