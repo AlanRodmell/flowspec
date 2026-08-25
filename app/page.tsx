@@ -92,8 +92,8 @@ interface SavedPlan {
 }
 
 const STORAGE_KEY = "flowspec-plan-v1";
-const NODE_W = 232;
-const NODE_H = 154;
+const NODE_W = 248;
+const NODE_H = 166;
 
 const KIND_META: Record<NodeKind, { label: string; color: string; icon: LucideIcon }> = {
   route: { label: "Route", color: "#ef6d48", icon: Route },
