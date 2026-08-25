@@ -17,18 +17,28 @@ npm run dev
 
 Open the local address printed in the terminal, normally `http://localhost:3000`.
 
+## Choose a workflow
+
+FlowSpec opens with two clear paths:
+
+- **Guided build** asks about one route, component, hook, store, service, API or test at a time. Each answer is added to the shared plan; the optional final step previews the connection before it is committed.
+- **Build it yourself** opens the freeform canvas for manual editing or importing a repository-analysis response.
+
+Both paths use the same editable diagram and feed the same Technical Review and exports.
+
 ## Planning workflow
 
 1. Edit the project title, objective, current understanding, stack and constraints.
 2. Add routes, components, hooks, stores, services, APIs, external boundaries or tests.
 3. Connect nodes and describe relationships such as props, callbacks, state reads or API calls.
-4. Open **VS Code chat**, expand **Plan → Build**, and select what the coding assistant should analyse.
-5. Choose the required response format:
+4. Open **Technical review** to inspect the hierarchical architecture, contracts, connections, evidence and automatically detected planning gaps.
+5. Open **VS Code chat**, expand **Plan → Build**, and select what the coding assistant should analyse.
+6. Choose the required response format:
    - Markdown with Mermaid
    - Implementation checklist
    - Structured JSON
    - Decision record
-6. Copy the generated prompt and paste it into Copilot Chat or Codex in VS Code.
+7. Copy the generated prompt and paste it into Copilot Chat or Codex in VS Code.
 
 The prompt tells the assistant to inspect the open repository, reconcile current code with the proposed design, cite file and line evidence, distinguish observed and proposed behavior, and return the selected output contract.
 
@@ -46,7 +56,7 @@ The prompt asks the assistant for one fenced `flowspec` JSON block. FlowSpec can
 
 - Plans automatically persist in browser local storage.
 - **Export → Editable plan** downloads the complete FlowSpec plan as JSON.
-- **Export → Technical document** downloads concise Markdown containing the project brief, Mermaid architecture diagram, component inventory, contracts, connections, and evidence.
+- **Export → Technical document** downloads concise Markdown containing the project brief, Mermaid architecture diagram, component inventory, contracts, connections, evidence and live review findings.
 - **Export → Mermaid diagram** downloads the canvas as a standalone `.mmd` flowchart.
 - **Open** restores a previously exported FlowSpec JSON file.
 - **Share** creates a URL containing an editable copy of the plan. Share links contain the plan data and should not include secrets; oversized plans should be shared through JSON export instead.
