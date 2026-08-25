@@ -33,6 +33,7 @@ import {
   Globe2,
   LayoutGrid,
   Maximize2,
+  Network,
   Plus,
   Route,
   Save,
@@ -40,14 +41,16 @@ import {
   Sparkles,
   TestTube2,
   Trash2,
+  Upload,
   Webhook,
   X,
   type LucideIcon,
 } from "lucide-react";
 import "@xyflow/react/dist/style.css";
+import { buildMermaidFlow, buildRepoAnalysisPrompt, parseRepoAnalysis, type RepoNodeKind } from "./flowspec-import";
 
-type NodeKind = "route" | "component" | "hook" | "state" | "service" | "api" | "external" | "test";
-type PanelTab = "prompt" | "inspect" | "brief";
+type NodeKind = RepoNodeKind;
+type PanelTab = "prompt" | "import" | "inspect" | "brief";
 type OutputFormat = "markdown-mermaid" | "checklist" | "json" | "decision-record";
 type TargetChat = "copilot" | "codex" | "generic";
 
@@ -89,6 +92,7 @@ interface SavedPlan {
   focus: string[];
   customAnalysis: string;
   outputRequirements: string;
+  repoScope?: string;
 }
 
 const STORAGE_KEY = "flowspec-plan-v1";
@@ -185,6 +189,7 @@ const INITIAL_EDGES: FlowEdge[] = [
 ];
 
 const DEFAULT_FOCUS = FOCUS_OPTIONS.map(([id]) => id).filter((id) => id !== "a11y");
+const DEFAULT_REPO_SCOPE = "Map the primary application structure and data flow. Focus on routes and entry points, feature-level components, hooks, state, services, APIs, and external systems.";
 
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -299,16 +304,22 @@ export default function Home() {
   const [focus, setFocus] = useState<string[]>(DEFAULT_FOCUS);
   const [customAnalysis, setCustomAnalysis] = useState("");
   const [outputRequirements, setOutputRequirements] = useState("Keep the answer below roughly 1,200 words unless a critical risk needs explanation.");
-  const [copied, setCopied] = useState(false);
+  const [repoScope, setRepoScope] = useState(DEFAULT_REPO_SCOPE);
+  const [analysisOutput, setAnalysisOutput] = useState("");
+  const [importError, setImportError] = useState("");
+  const [importSummary, setImportSummary] = useState("");
+  const [copied, setCopied] = useState<"build" | "analysis">();
   const [toast, setToast] = useState("");
   const [savedAt, setSavedAt] = useState<string>();
   const [hydrated, setHydrated] = useState(false);
   const flowRef = useRef<ReactFlowInstance<FlowNode, FlowEdge> | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const analysisFileRef = useRef<HTMLInputElement | null>(null);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId);
   const selectedEdge = edges.find((item) => item.id === selectedEdgeId);
   const prompt = useMemo(() => buildPrompt({ project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements }), [customAnalysis, edges, focus, nodes, outputFormat, outputRequirements, project, targetChat]);
+  const analysisPrompt = useMemo(() => buildRepoAnalysisPrompt(targetChat === "copilot" ? "GitHub Copilot Chat" : targetChat === "codex" ? "Codex" : "the coding assistant", repoScope), [repoScope, targetChat]);
 
   const flash = useCallback((message: string) => {
     setToast(message);
@@ -330,6 +341,7 @@ export default function Home() {
             setFocus(saved.focus ?? DEFAULT_FOCUS);
             setCustomAnalysis(saved.customAnalysis ?? "");
             setOutputRequirements(saved.outputRequirements ?? "");
+            setRepoScope(saved.repoScope ?? DEFAULT_REPO_SCOPE);
           }
         }
       } catch {
@@ -344,12 +356,12 @@ export default function Home() {
   useEffect(() => {
     if (!hydrated) return;
     const timer = window.setTimeout(() => {
-      const saved: SavedPlan = { version: 1, project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements };
+      const saved: SavedPlan = { version: 1, project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements, repoScope };
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
       setSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [customAnalysis, edges, focus, hydrated, nodes, outputFormat, outputRequirements, project, targetChat]);
+  }, [customAnalysis, edges, focus, hydrated, nodes, outputFormat, outputRequirements, project, repoScope, targetChat]);
 
   const addNode = (kind: NodeKind) => {
     const id = uid(kind);
@@ -399,21 +411,24 @@ export default function Home() {
     window.setTimeout(() => void flowRef.current?.fitView({ padding: .18, duration: 400 }), 30);
   };
 
-  const copyPrompt = async () => {
+  const copyText = async (value: string, mode: "build" | "analysis", message: string) => {
     try {
-      await navigator.clipboard.writeText(prompt);
+      await navigator.clipboard.writeText(value);
     } catch {
       const textarea = document.createElement("textarea");
-      textarea.value = prompt;
+      textarea.value = value;
       document.body.appendChild(textarea);
       textarea.select();
       document.execCommand("copy");
       textarea.remove();
     }
-    setCopied(true);
-    flash("Prompt copied — paste it into VS Code chat");
-    window.setTimeout(() => setCopied(false), 1600);
+    setCopied(mode);
+    flash(message);
+    window.setTimeout(() => setCopied(undefined), 1600);
   };
+
+  const copyPrompt = () => copyText(prompt, "build", "Build prompt copied — paste it into VS Code chat");
+  const copyAnalysisPrompt = () => copyText(analysisPrompt, "analysis", "Analysis prompt copied — paste it into VS Code chat");
 
   const download = (contents: string, filename: string, type: string) => {
     const url = URL.createObjectURL(new Blob([contents], { type }));
@@ -425,8 +440,17 @@ export default function Home() {
   };
 
   const exportPlan = () => {
-    const saved: SavedPlan = { version: 1, project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements };
+    const saved: SavedPlan = { version: 1, project, nodes, edges, targetChat, outputFormat, focus, customAnalysis, outputRequirements, repoScope };
     download(JSON.stringify(saved, null, 2), `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "flowspec"}.json`, "application/json");
+  };
+
+  const exportMermaid = () => {
+    const mermaid = buildMermaidFlow(
+      nodes.map((node) => ({ id: node.id, label: node.data.label, kind: node.data.kind })),
+      edges.map((item) => ({ source: item.source, target: item.target, relationship: item.data?.relationship ?? String(item.label ?? "connects"), payload: item.data?.payload })),
+    );
+    download(mermaid, `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "flowspec"}.mmd`, "text/plain");
+    flash("Mermaid map downloaded");
   };
 
   const importPlan = async (file?: File) => {
@@ -442,12 +466,66 @@ export default function Home() {
       setFocus(saved.focus ?? DEFAULT_FOCUS);
       setCustomAnalysis(saved.customAnalysis ?? "");
       setOutputRequirements(saved.outputRequirements ?? "");
+      setRepoScope(saved.repoScope ?? DEFAULT_REPO_SCOPE);
       setSelectedNodeId(undefined);
       setSelectedEdgeId(undefined);
       flash("Plan loaded");
       window.setTimeout(() => void flowRef.current?.fitView({ padding: .18, duration: 400 }), 60);
     } catch {
       flash("That file is not a valid FlowSpec plan");
+    }
+  };
+
+  const loadAnalysisResponse = async (file?: File) => {
+    if (!file) return;
+    try {
+      setAnalysisOutput(await file.text());
+      setImportError("");
+      setImportSummary("");
+      setTab("import");
+      flash("Analysis response loaded — review and import it");
+    } catch {
+      setImportError("FlowSpec could not read that response file.");
+    }
+  };
+
+  const importRepoMap = () => {
+    setImportError("");
+    setImportSummary("");
+    try {
+      const imported = parseRepoAnalysis(analysisOutput);
+      const importedNodes: FlowNode[] = imported.nodes.map((item, index) => ({
+        id: item.id,
+        type: "planner",
+        position: { x: (index % 4) * 30, y: Math.floor(index / 4) * 30 },
+        data: {
+          label: item.label,
+          kind: item.kind,
+          responsibility: item.responsibility,
+          fileHint: item.fileHint,
+          state: item.state,
+          inputs: item.inputs,
+          outputs: item.outputs,
+          notes: item.notes,
+        },
+      }));
+      const importedEdges: FlowEdge[] = imported.edges.map((item) => ({
+        ...edge(item.id, item.source, item.target, item.relationship, item.payload),
+        data: { relationship: item.relationship, payload: item.payload, notes: item.notes },
+      }));
+      const openQuestions = imported.unknowns.length ? `\n\nOpen questions from repository analysis:\n- ${imported.unknowns.join("\n- ")}` : "";
+      setProject({ ...imported.project, existingContext: `${imported.project.existingContext}${openQuestions}`.trim() });
+      setNodes(layoutGraph(importedNodes, importedEdges));
+      setEdges(importedEdges);
+      setSelectedNodeId(undefined);
+      setSelectedEdgeId(undefined);
+      const summary = `Imported ${importedNodes.length} nodes and ${importedEdges.length} connections`;
+      setImportSummary(summary);
+      setTab("inspect");
+      flash(summary);
+      window.setTimeout(() => void flowRef.current?.fitView({ padding: .18, duration: 500 }), 80);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "FlowSpec could not import that analysis response.");
     }
   };
 
@@ -458,6 +536,9 @@ export default function Home() {
     setEdges([]);
     setSelectedNodeId("entry");
     setSelectedEdgeId(undefined);
+    setImportError("");
+    setImportSummary("");
+    setAnalysisOutput("");
     setTab("brief");
   };
 
@@ -469,8 +550,10 @@ export default function Home() {
           <button className="button ghost" onClick={newPlan}><FileJson size={14} /> New</button>
           <button className="button ghost" onClick={() => fileRef.current?.click()}><FolderOpen size={14} /> Open</button>
           <button className="button ghost" onClick={exportPlan}><Save size={14} /> Export</button>
+          <button className="button ghost" onClick={() => setTab("import")}><Network size={15} /> Map repo</button>
           <button className="button primary" onClick={() => setTab("prompt")}><Sparkles size={15} /> Build prompt</button>
           <input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={(event) => { void importPlan(event.target.files?.[0]); event.target.value = ""; }} />
+          <input ref={analysisFileRef} type="file" accept="application/json,text/markdown,text/plain,.json,.md,.txt" hidden onChange={(event) => { void loadAnalysisResponse(event.target.files?.[0]); event.target.value = ""; }} />
         </div>
       </header>
 
@@ -491,12 +574,12 @@ export default function Home() {
               return <button key={kind} style={{ "--kind-color": meta.color } as React.CSSProperties} onClick={() => addNode(kind)}><span><Icon size={14} /></span><strong>{meta.label}</strong><Plus size={13} /></button>;
             })}
           </div>
-          <div className="palette-tip"><strong>Prompt, not code</strong><span>FlowSpec captures intent and contracts. Your coding assistant inspects the real repository.</span></div>
+          <div className="palette-tip"><strong>Round-trip with chat</strong><span>Plan a change for your coding assistant, or import its repository analysis as a map.</span></div>
         </aside>
 
         <section className="canvas-panel">
           <div className="canvas-toolbar">
-            <div><button onClick={() => addNode("component")}><Plus size={14} /> Node</button><button onClick={autoLayout}><LayoutGrid size={14} /> Arrange</button><button onClick={() => flowRef.current?.fitView({ padding: .18, duration: 350 })}><Maximize2 size={14} /> Fit</button></div>
+            <div><button onClick={() => addNode("component")}><Plus size={14} /> Node</button><button onClick={autoLayout}><LayoutGrid size={14} /> Arrange</button><button onClick={() => flowRef.current?.fitView({ padding: .18, duration: 350 })}><Maximize2 size={14} /> Fit</button><button onClick={exportMermaid} disabled={!nodes.length}><Download size={14} /> Mermaid</button></div>
             <span className="save-status"><i /> {savedAt ? `Saved ${savedAt}` : "Saved locally"}</span>
           </div>
           <div className="flow-wrap">
@@ -528,14 +611,15 @@ export default function Home() {
 
         <aside className="details-panel">
           <div className="tabs">
-            <button className={tab === "prompt" ? "active" : ""} onClick={() => setTab("prompt")}>Prompt</button>
+            <button className={tab === "prompt" ? "active" : ""} onClick={() => setTab("prompt")}>Build</button>
+            <button className={tab === "import" ? "active" : ""} onClick={() => setTab("import")}>Repo map</button>
             <button className={tab === "inspect" ? "active" : ""} onClick={() => setTab("inspect")}>Inspector</button>
             <button className={tab === "brief" ? "active" : ""} onClick={() => setTab("brief")}>Brief</button>
           </div>
 
           {tab === "prompt" ? (
             <div className="panel-scroll prompt-builder">
-              <div className="section-title"><div><span className="eyebrow">VS Code handoff</span><h2>Build the analysis prompt</h2></div><span>{prompt.length.toLocaleString()} chars</span></div>
+              <div className="section-title"><div><span className="eyebrow">VS Code handoff</span><h2>Build the implementation prompt</h2></div><span>{prompt.length.toLocaleString()} chars</span></div>
               <div className="form-grid two">
                 <label>Target chat<select value={targetChat} onChange={(event) => setTargetChat(event.target.value as TargetChat)}><option value="copilot">GitHub Copilot</option><option value="codex">Codex</option><option value="generic">Generic assistant</option></select></label>
                 <label>Output format<select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as OutputFormat)}>{(Object.keys(OUTPUT_LABELS) as OutputFormat[]).map((format) => <option value={format} key={format}>{OUTPUT_LABELS[format]}</option>)}</select></label>
@@ -545,7 +629,33 @@ export default function Home() {
               <label className="field-label">Output requirements<textarea rows={2} value={outputRequirements} onChange={(event) => setOutputRequirements(event.target.value)} placeholder="Add any required headings, length limits or schema rules." /></label>
               <div className="prompt-preview-heading"><label>Generated prompt</label><button onClick={() => download(prompt, `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "flowspec"}-prompt.md`, "text/markdown")}><Download size={13} /> .md</button></div>
               <textarea className="prompt-preview" readOnly value={prompt} aria-label="Generated prompt" />
-              <button className="copy-button" onClick={() => void copyPrompt()}>{copied ? <Check size={16} /> : <Copy size={16} />}{copied ? "Copied — paste into VS Code" : `Copy for ${targetChat === "copilot" ? "Copilot" : targetChat === "codex" ? "Codex" : "chat"}`}</button>
+              <button className="copy-button" onClick={() => void copyPrompt()}>{copied === "build" ? <Check size={16} /> : <Copy size={16} />}{copied === "build" ? "Copied — paste into VS Code" : `Copy for ${targetChat === "copilot" ? "Copilot" : targetChat === "codex" ? "Codex" : "chat"}`}</button>
+            </div>
+          ) : null}
+
+          {tab === "import" ? (
+            <div className="panel-scroll repo-importer">
+              <div className="section-title"><div><span className="eyebrow">Existing repository</span><h2>Turn repo analysis into a map</h2></div></div>
+              <div className="roundtrip-steps" aria-label="Repository mapping workflow">
+                <div><span>1</span><strong>Prompt chat</strong><small>Analyse the open repo</small></div>
+                <ArrowRight size={15} />
+                <div><span>2</span><strong>Import output</strong><small>Create an editable map</small></div>
+              </div>
+              <div className="form-grid repo-controls">
+                <label>Target chat<select value={targetChat} onChange={(event) => setTargetChat(event.target.value as TargetChat)}><option value="copilot">GitHub Copilot</option><option value="codex">Codex</option><option value="generic">Generic assistant</option></select></label>
+                <label>Analysis scope<textarea rows={3} value={repoScope} onChange={(event) => setRepoScope(event.target.value)} placeholder="Which application area or user flow should the chat trace?" /></label>
+              </div>
+              <div className="prompt-preview-heading"><label>Repository analysis prompt</label><button onClick={() => download(analysisPrompt, "flowspec-repo-analysis-prompt.md", "text/markdown")}><Download size={13} /> .md</button></div>
+              <textarea className="prompt-preview repo-prompt" readOnly value={analysisPrompt} aria-label="Repository analysis prompt" />
+              <button className="copy-button" onClick={() => void copyAnalysisPrompt()}>{copied === "analysis" ? <Check size={16} /> : <Copy size={16} />}{copied === "analysis" ? "Copied — run it in VS Code" : `Copy analysis prompt for ${targetChat === "copilot" ? "Copilot" : targetChat === "codex" ? "Codex" : "chat"}`}</button>
+
+              <div className="import-divider"><span>Then bring the response back</span></div>
+              <div className="response-heading"><div><strong>Copilot analysis output</strong><span>Paste the whole response or its fenced FlowSpec JSON block.</span></div><button className="text-button" onClick={() => analysisFileRef.current?.click()}><FolderOpen size={13} /> Load file</button></div>
+              <textarea className={`analysis-output${importError ? " invalid" : ""}`} value={analysisOutput} onChange={(event) => { setAnalysisOutput(event.target.value); setImportError(""); setImportSummary(""); }} rows={10} spellCheck={false} aria-label="Copilot analysis output" aria-invalid={Boolean(importError)} placeholder={'Paste Copilot\'s complete response here. FlowSpec will find the ```flowspec JSON block automatically.'} />
+              {importError ? <div className="import-message error" role="alert"><strong>Couldn’t import this response</strong><span>{importError}</span></div> : null}
+              {importSummary ? <div className="import-message success" role="status"><Check size={15} /><span>{importSummary}</span></div> : null}
+              <button className="import-button" disabled={!analysisOutput.trim()} onClick={importRepoMap}><Upload size={16} /> Import and replace canvas</button>
+              <p className="import-note">Importing replaces the current canvas. Export the current plan first if you need a separate copy.</p>
             </div>
           ) : null}
 
@@ -553,7 +663,7 @@ export default function Home() {
             <div className="panel-scroll inspector">
               {!selectedNode && !selectedEdge ? <div className="empty-inspector"><Boxes size={24} /><strong>Select a node or connection</strong><span>Edit its responsibility, contracts, state or payload here.</span></div> : null}
               {selectedNode ? <><div className="section-title"><div><span className="eyebrow">Node contract</span><h2>{selectedNode.data.label}</h2></div><button className="danger-icon" onClick={deleteSelection}><Trash2 size={15} /></button></div><div className="form-grid"><label>Type<select value={selectedNode.data.kind} onChange={(event) => updateNode({ kind: event.target.value as NodeKind })}>{(Object.keys(KIND_META) as NodeKind[]).map((kind) => <option value={kind} key={kind}>{KIND_META[kind].label}</option>)}</select></label><label>Name<input value={selectedNode.data.label} onChange={(event) => updateNode({ label: event.target.value })} /></label><label>Responsibility<textarea rows={3} value={selectedNode.data.responsibility} onChange={(event) => updateNode({ responsibility: event.target.value })} /></label><label>Existing or likely file area<input value={selectedNode.data.fileHint} placeholder="src/features/products/…" onChange={(event) => updateNode({ fileHint: event.target.value })} /></label></div><ListEditor title="Inputs" items={selectedNode.data.inputs} placeholder="prop, parameter or event" onChange={(inputs) => updateNode({ inputs })} /><ListEditor title="Outputs" items={selectedNode.data.outputs} placeholder="render, callback or result" onChange={(outputs) => updateNode({ outputs })} /><ListEditor title="State" items={selectedNode.data.state} placeholder="owned or consumed state" onChange={(state) => updateNode({ state })} /><label className="field-label">Notes<textarea rows={3} value={selectedNode.data.notes} onChange={(event) => updateNode({ notes: event.target.value })} /></label></> : null}
-              {selectedEdge ? <><div className="section-title"><div><span className="eyebrow">Connection</span><h2>{nodes.find((node) => node.id === selectedEdge.source)?.data.label} → {nodes.find((node) => node.id === selectedEdge.target)?.data.label}</h2></div><button className="danger-icon" onClick={deleteSelection}><Trash2 size={15} /></button></div><div className="form-grid"><label>Relationship<select value={selectedEdge.data?.relationship ?? "connects"} onChange={(event) => updateEdge({ relationship: event.target.value })}>{RELATIONSHIPS.map((relationship) => <option key={relationship}>{relationship}</option>)}</select></label><label>Data or contract<input value={selectedEdge.data?.payload ?? ""} placeholder="filters: ProductFilters" onChange={(event) => updateEdge({ payload: event.target.value })} /></label><label>Notes<textarea rows={4} value={selectedEdge.data?.notes ?? ""} onChange={(event) => updateEdge({ notes: event.target.value })} /></label></div></> : null}
+              {selectedEdge ? <><div className="section-title"><div><span className="eyebrow">Connection</span><h2>{nodes.find((node) => node.id === selectedEdge.source)?.data.label} → {nodes.find((node) => node.id === selectedEdge.target)?.data.label}</h2></div><button className="danger-icon" onClick={deleteSelection}><Trash2 size={15} /></button></div><div className="form-grid"><label>Relationship<input list="relationship-options" value={selectedEdge.data?.relationship ?? "connects"} onChange={(event) => updateEdge({ relationship: event.target.value })} /><datalist id="relationship-options">{RELATIONSHIPS.map((relationship) => <option value={relationship} key={relationship} />)}</datalist></label><label>Data or contract<input value={selectedEdge.data?.payload ?? ""} placeholder="filters: ProductFilters" onChange={(event) => updateEdge({ payload: event.target.value })} /></label><label>Notes<textarea rows={4} value={selectedEdge.data?.notes ?? ""} onChange={(event) => updateEdge({ notes: event.target.value })} /></label></div></> : null}
             </div>
           ) : null}
 
@@ -562,7 +672,7 @@ export default function Home() {
           ) : null}
         </aside>
       </div>
-      <footer className="statusbar"><span><i /> Local-first plan · no repository access</span><span>{nodes.length} nodes · {edges.length} connections · {OUTPUT_LABELS[outputFormat]}</span></footer>
+      <footer className="statusbar"><span><i /> Local-first · repository analysis via VS Code chat</span><span>{nodes.length} nodes · {edges.length} connections · {OUTPUT_LABELS[outputFormat]}</span></footer>
       {toast ? <div className="toast">{toast}</div> : null}
     </main>
   );
