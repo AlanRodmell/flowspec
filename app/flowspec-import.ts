@@ -191,7 +191,9 @@ function mermaidLabel(value: string): string {
     .trim();
 }
 
-export function buildMermaidFlow(nodes: MermaidNode[], edges: MermaidEdge[]): string {
+export type FlowDirection = "LR" | "RL" | "TB";
+
+export function buildMermaidFlow(nodes: MermaidNode[], edges: MermaidEdge[], direction: FlowDirection = "LR"): string {
   const aliases = new Map(nodes.map((node, index) => [node.id, `n${index + 1}`]));
   const nodeLines = nodes.map((node, index) => `  n${index + 1}["${mermaidLabel(node.label)}<br/>(${node.kind})"]`);
   const edgeLines = edges.flatMap((item) => {
@@ -207,7 +209,7 @@ export function buildMermaidFlow(nodes: MermaidNode[], edges: MermaidEdge[]): st
   }).filter(Boolean);
 
   return [
-    "flowchart LR",
+    `flowchart ${direction}`,
     ...nodeLines,
     ...edgeLines,
     "  classDef route fill:#fff2ed,stroke:#ef6d48,color:#17202a",
@@ -220,6 +222,67 @@ export function buildMermaidFlow(nodes: MermaidNode[], edges: MermaidEdge[]): st
     "  classDef test fill:#f1f8ee,stroke:#679e55,color:#17202a",
     ...classLines,
   ].join("\n");
+}
+
+function markdownCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ").trim() || "—";
+}
+
+function markdownList(items: string[]): string {
+  const values = items.map((item) => item.trim()).filter(Boolean);
+  return values.length ? values.join(", ") : "—";
+}
+
+export function buildTechnicalDocument(project: RepoProjectBrief, nodes: ImportedRepoNode[], edges: ImportedRepoEdge[], direction: FlowDirection = "LR"): string {
+  const names = new Map(nodes.map((node) => [node.id, node.label]));
+  const inventory = nodes.map((node) => `| ${markdownCell(node.kind)} | ${markdownCell(node.label)} | ${markdownCell(node.responsibility)} | ${markdownCell(node.fileHint)} |`);
+  const contracts = nodes.map((node) => `### ${node.label}\n\n- **Type:** ${node.kind}\n- **Inputs / props:** ${markdownList(node.inputs)}\n- **Outputs / callbacks:** ${markdownList(node.outputs)}\n- **State:** ${markdownList(node.state)}`);
+  const flowRows = edges.map((item) => `| ${markdownCell(names.get(item.source) ?? item.source)} | ${markdownCell(item.relationship)} | ${markdownCell(names.get(item.target) ?? item.target)} | ${markdownCell(item.payload)} |`);
+  const evidence = [
+    ...nodes.filter((node) => node.notes.trim()).map((node) => `- **${node.label}:** ${node.notes.trim()}`),
+    ...edges.filter((item) => item.notes.trim()).map((item) => `- **${names.get(item.source) ?? item.source} → ${names.get(item.target) ?? item.target}:** ${item.notes.trim()}`),
+  ];
+
+  return `# ${project.title || "FlowSpec technical overview"}
+
+## Purpose
+
+${project.objective || "No objective supplied."}
+
+## Current context
+
+${project.existingContext || "No current context supplied."}
+
+- **Stack:** ${project.stack || "Not specified"}
+- **Constraints:** ${project.constraints || "None supplied"}
+- **Scope:** ${nodes.length} components and boundaries; ${edges.length} connections
+
+## Architecture and data flow
+
+\`\`\`mermaid
+${buildMermaidFlow(nodes, edges, direction)}
+\`\`\`
+
+## Component inventory
+
+| Type | Component or boundary | Responsibility | File or location |
+| --- | --- | --- | --- |
+${inventory.length ? inventory.join("\n") : "| — | No components mapped | — | — |"}
+
+## Component contracts
+
+${contracts.length ? contracts.join("\n\n") : "No component contracts mapped."}
+
+## Connection inventory
+
+| Source | Relationship | Target | Props, event or payload |
+| --- | --- | --- | --- |
+${flowRows.length ? flowRows.join("\n") : "| — | No connections mapped | — | — |"}
+
+## Evidence and notes
+
+${evidence.length ? evidence.join("\n") : "No additional evidence or notes supplied."}
+`;
 }
 
 export function parseRepoAnalysis(input: string): ImportedRepoAnalysis {

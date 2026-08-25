@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildMermaidFlow, buildRepoAnalysisPrompt, parseRepoAnalysis } from "./flowspec-import.ts";
+import { buildMermaidFlow, buildRepoAnalysisPrompt, buildTechnicalDocument, parseRepoAnalysis } from "./flowspec-import.ts";
 
 const validResponse = `Here is the requested map.
 
@@ -95,4 +95,20 @@ test("exports the editable map as Mermaid", () => {
   assert.match(mermaid, /n1 -->\|renders: route params\| n2/);
   assert.match(mermaid, /class n1 route/);
   assert.match(mermaid, /class n2 component/);
+});
+
+test("exports Mermaid in a selected flow direction", () => {
+  const result = parseRepoAnalysis(validResponse);
+  assert.match(buildMermaidFlow(result.nodes, result.edges, "RL"), /^flowchart RL/);
+  assert.match(buildMermaidFlow(result.nodes, result.edges, "TB"), /^flowchart TB/);
+});
+
+test("exports a concise technical Markdown document", () => {
+  const result = parseRepoAnalysis(validResponse);
+  const document = buildTechnicalDocument(result.project, result.nodes, result.edges);
+  assert.match(document, /^# Shop/);
+  assert.match(document, /```mermaid\nflowchart LR/);
+  assert.match(document, /\| route \| Product route \|/);
+  assert.match(document, /\*\*Inputs \/ props:\*\*/);
+  assert.match(document, /\| Product route \| renders \| Product page \| route params \|/);
 });
